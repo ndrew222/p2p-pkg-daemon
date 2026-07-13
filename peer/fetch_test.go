@@ -6,13 +6,16 @@ import (
 	"net"
 	"testing"
 
-	"github.com/ndrew222/p2p-pkg-daemon/protocol"
+	"github.com/ndrew222/p2p-pkg-daemon/peerwire"
 )
 
-// startTestPeer spins up a fake peer that always serves `content`, so we can
-// test FetchFromPeer without needing a real second machine
+func cidOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func startTestPeer(t *testing.T, content []byte) string {
-	ln, err := net.Listen("tcp", "127.0.0.1:0") // :0 = OS picks a free port
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,22 +26,18 @@ func startTestPeer(t *testing.T, content []byte) string {
 			return
 		}
 		defer conn.Close()
-		if _, err := protocol.ReadMessage(conn); err != nil { // read the request
+		if _, err := peerwire.ReadMessage(conn); err != nil {
 			return
 		}
-		conn.Write(protocol.Encode(protocol.Message{Type: protocol.MsgData, Payload: content}))
+		conn.Write(peerwire.Encode(peerwire.Message{Type: peerwire.MsgData, Payload: content}))
 	}()
 	return ln.Addr().String()
 }
 
 func TestFetchFromPeerHappyPath(t *testing.T) {
 	content := []byte("pretend package bytes")
-	sum := sha256.Sum256(content)
-	cid := hex.EncodeToString(sum[:])
-
 	addr := startTestPeer(t, content)
-
-	got, err := FetchFromPeer(addr, cid)
+	got, err := FetchFromPeer(addr, cidOf(content))
 	if err != nil {
 		t.Fatalf("fetch failed: %v", err)
 	}
@@ -48,13 +47,27 @@ func TestFetchFromPeerHappyPath(t *testing.T) {
 }
 
 func TestFetchRejectsTamperedBytes(t *testing.T) {
-	// We ask for the CID of the RIGHT bytes, but the peer serves WRONG bytes
-	sum := sha256.Sum256([]byte("right bytes"))
-	wantCID := hex.EncodeToString(sum[:])
-
-	addr := startTestPeer(t, []byte("wrong bytes"))
-
+	wantCID := cidOf([]byte("right bytes"))
+	addr := startTestPeer(t, []byte("WRONG bytes"))
 	if _, err := FetchFromPeer(addr, wantCID); err == nil {
 		t.Fatal("expected a hash-mismatch error, got nil")
+	}
+}
+
+type stubLister struct{ addr string }
+
+func (s stubLister) Peers(cid string) ([]string, error) {
+	return []string{s.addr}, nil
+}
+
+func TestDownloadThroughLister(t *testing.T) {
+	content := []byte("package via download")
+	addr := startTestPeer(t, content)
+	got, err := Download(stubLister{addr: addr}, cidOf(content))
+	if err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("got %q, want %q", got, content)
 	}
 }
