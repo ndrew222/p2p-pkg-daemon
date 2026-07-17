@@ -22,12 +22,14 @@ Deprecated: anything referencing IPFS, CIDs, or `peer_id`. Packages are addresse
 ## Layout
 
 ```
-cmd/trac/        tracker entry point (thin main only)
-cmd/jmj/         daemon entry point (thin main only)
-internal/tracker/  tracker logic
-internal/daemon/   daemon logic (facade, fetch loop, cache watcher, keep-alive)
-docs/            specs — agents do not modify these
-docs/logs/       agent work logs — see below
+cmd/trac/           tracker entry point (thin main only)
+cmd/jmj/            daemon entry point (thin main only)
+internal/tracker/   tracker logic
+internal/proto/     message types, encoding, validation (shared by both sides)
+internal/discovery/ daemon-side tracker client (announce/ping/IWant)
+internal/daemon/    daemon logic — facade, fetch loop, cache watcher (created as work lands)
+docs/               specs — agents do not modify these
+docs/logs/          agent work logs — see below`
 ```
 
 Anything not listed above is not fixed. Do not create new top-level directories
