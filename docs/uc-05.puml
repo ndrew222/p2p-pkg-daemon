@@ -1,0 +1,75 @@
+@startuml
+title UC-05 · Announce Packages & Tracker Liveness
+
+participant "P2P Daemon" as Daemon
+participant "pkg cache\n(/var/cache/pkg)" as Cache
+participant Tracker
+
+note over Daemon : Two message types reach the tracker:\n- ping()  — bare keep-alive. Triggered by daemon startup (UC-01)\n  and a periodic timer (< timeout; values -> ADR). Suppressed while\n  the daemon has nothing registered (empty cache) — see below.\n- announce(list) — carries a package list. Triggered by the cache\n  watcher when a new package appears in the pkg cache (whether\n  fetched via P2P or an ordinary mirror).
+
+alt [message = ping()  (startup / keep-alive)]
+
+    Daemon -> Tracker : ping()
+    activate Tracker
+
+    alt [tracker knows this IP]
+        Tracker -> Tracker : resetTimeout(IP)
+        Tracker --> Daemon : acknowledgement
+        note right of Tracker : When the timeout expires without\na ping, the IP and its package\nlist are flushed from memory
+        deactivate Tracker
+
+    else [tracker does not know this IP]
+        Tracker --> Daemon : requestPackageList()
+        deactivate Tracker
+
+        Daemon -> Cache : scanCache() (read-only)
+        activate Cache
+        Cache --> Daemon : packageList
+        deactivate Cache
+
+        Daemon -> Daemon : sanityFilter(packageList)
+        note right : Cheap checks only: valid name-version\nfilename, file size matches repo DB entry.\nNo hashing. The downloading peer verifies\nintegrity anyway (UC-02), so the cache is\ntrusted at announce time.
+
+        Daemon -> Tracker : announce(listeningPort, packageList)
+        note right : IP comes from the connection's source\naddress; the serving port cannot be\ninferred and must be in the message\n(ADR-001 spec detail)
+        activate Tracker
+        alt [list non-empty]
+            Tracker -> Tracker : register(IP:port, packageList), startTimeout(IP)
+            Tracker --> Daemon : acknowledgement of updated list
+        else [list empty]
+            Tracker --> Daemon : acknowledgement (nothing retained)
+            note right of Tracker : Empty list acked (daemon learns tracker\nis reachable) but NOT stored; IP stays\nunknown. Daemon then suppresses keep-alive\npings until a package appears, else every\nping re-loops this branch (B18).
+        else [network error mid-stream]
+            Daemon -> Daemon : logError() ; scheduleRetry()
+            note right : Tracker never registered the IP,\nso it treats it as unknown on retry.\nSelf-healing.
+        end
+        deactivate Tracker
+    end
+
+else [message = announce(list)  (cache watcher, unsolicited)]
+
+    note over Daemon : A new package appeared in the cache.\nThe daemon announces directly — it does NOT wait\nto be asked. Works whether or not the tracker\ncurrently knows this IP. This is the path a known\ndaemon uses to push an updated list — the case the\nold diagram could not express (B13/A14).
+
+    Daemon -> Cache : scanCache() (read-only)
+    activate Cache
+    Cache --> Daemon : packageList
+    deactivate Cache
+    Daemon -> Daemon : sanityFilter(packageList)
+
+    Daemon -> Tracker : announce(listeningPort, fullPackageList)
+    activate Tracker
+    note right of Tracker : An announce from a KNOWN IP replaces\nits entry AND resets the timeout.
+
+    alt [list non-empty]
+        Tracker -> Tracker : register(IP:port, packageList), startTimeout(IP)
+        Tracker --> Daemon : acknowledgement of updated list
+    else [list empty  (e.g. after pkg clean)]
+        Tracker -> Tracker : drop(IP)
+        Tracker --> Daemon : acknowledgement (deregistered)
+        note right of Tracker : Empty re-announce cleanly deregisters\nthe daemon until a package reappears.
+    else [network error mid-stream]
+        Daemon -> Daemon : logError() ; scheduleRetry()
+    end
+    deactivate Tracker
+end
+@enduml

@@ -1,0 +1,76 @@
+@startuml
+title UC-02 · Install Package via P2P (merged UC-02 + UC-04)
+
+actor User
+participant pkg
+participant "P2P Daemon" as Daemon
+participant "Tracker" as Tracker
+participant "Peer Daemon\n(serving side, UC-06)" as Peer
+
+User -> pkg: pkg.install(packageName-version)
+
+pkg -> pkg: searchDatabase(packageName-version)
+
+alt [packageName-version is invalid]
+    pkg --> User : error("unknown package")
+
+else [package name is valid]
+    pkg -> pkg: isDownloaded(packageName-version)
+
+    alt [file already local]
+        pkg -> pkg: install(packageName-version)
+
+    else [file not local]
+        pkg -> Daemon: packageName-version
+        note right : If pkg requests multiple packages,\neach is handled as an independent\nrequest (no batching at the tracker)
+
+        activate Daemon
+        Daemon -> Tracker: IWant(packageName-version)
+
+        alt [tracker connected]
+            Tracker -> Tracker: checkDatabase(packageName-version)
+            activate Tracker
+            alt [tracker has peers]
+                Tracker --> Daemon: peerList
+                deactivate Tracker
+
+                loop [try peers in tracker order, skipping local blacklist, while file not downloaded]
+                Daemon -> Peer : establishConnection()
+                note right : Plain HTTP over TCP to the peer's\nadvertised IP:port (ADR-001: NAT traversal\npunted; QUIC hole-punching = stretch goal).\nConnection timeout (e.g. NATed peer) →\ntry next peer; the loop covers it.
+                activate Peer
+                Daemon -> Peer : requestPackage(packageName-version)
+                Peer --> Daemon : packageBytes (streaming, to temp buffer)
+                deactivate Peer
+
+                Daemon -> Daemon : computeHash(tempBytes)
+                note right : Expected hash read from pkg's\nrepository DB (read-only access)
+
+                alt [hash matches]
+                Daemon --> pkg : packageBytes (served as mirror response)
+                pkg -> pkg : verifyHash + save to pkg cache
+                pkg -> pkg : install(packageName-version)
+                pkg --> User : success
+
+                Daemon -> Daemon : cacheWatcher detects new package
+                note right : Triggers announce (UC-05).\nSame mechanism covers packages\nacquired via ordinary mirrors,\nkeeping them seedable too.
+
+                else [hash mismatch (corrupt / tampered)]
+                Daemon -> Daemon : discardTempBytes()
+                Daemon -> Daemon : markPeerUntrusted(peer)
+                note right : Local blacklist only.\nSelect next peer and retry.\nIf all peers exhausted →\nHTTP error so pkg falls\nback to next mirror.
+                end
+                end
+
+            else [tracker has no peer]
+                Tracker --> Daemon: empty
+                deactivate Tracker
+                Daemon --> pkg : HTTP error → pkg tries next mirror
+            end
+        else [tracker unreachable]
+            Daemon -> Daemon : No response from tracker after a few seconds
+            Daemon --> pkg : HTTP error → pkg tries next mirror
+        end
+    end
+deactivate Daemon
+end
+@enduml

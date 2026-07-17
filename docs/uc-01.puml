@@ -1,0 +1,65 @@
+@startuml
+title UC-01 · Configure P2P Daemon
+ 
+actor       User
+participant "p2ppkg Daemon" as Daemon
+participant "Config File"   as Config
+participant Tracker
+ 
+User -> Daemon : configure(trackerAddr, storageDir, port, ...)
+activate Daemon
+ 
+Daemon -> Daemon : validateArgs()
+note right : Fail fast, before touching disk.\nCheck port range, directory\nexistence, address format
+ 
+alt [invalid setting value]
+Daemon --> User : error("Invalid setting: <field>")
+note right : Config file untouched
+ 
+else [args valid]
+Daemon -> Config : readConfig()
+activate Config
+ 
+alt [file readable]
+Config --> Daemon : currentSettings
+ 
+else [file missing]
+Config --> Daemon : notFound
+note right : Not an error; a fresh config\nwill be written below
+ 
+else [file corrupted]
+Config --> Daemon : parseError
+Daemon -> Config : moveTo("config.bak")
+note right : Corrupt file preserved,\nthen treated as missing
+end
+deactivate Config
+ 
+Daemon -> Daemon : merge(currentSettings ?: defaults, changedKeys)
+note right : Requested fields override;\nunspecified fields keep their\nexisting value, or defaults if\nthere was no readable file
+ 
+Daemon -> Config : writeConfig(merged)
+activate Config
+ 
+alt [write ok]
+Config --> Daemon : ok
+deactivate Config
+Daemon -> Daemon : loadConfig()
+ 
+Daemon -> Tracker : ping()
+activate Tracker
+note right of Tracker : Registration per liveness\nprotocol (UC-05)
+Tracker --> Daemon : acknowledgement (peer registered)
+deactivate Tracker
+ 
+Daemon --> User : "Daemon configured and ready"
+ 
+else [write fails]
+Config --> Daemon : permissionDenied
+deactivate Config
+Daemon --> User : error("Permission denied on config path")
+note right : Previous config unchanged\n(or preserved as config.bak\nin the corrupted case)
+end
+end
+ 
+deactivate Daemon
+@enduml

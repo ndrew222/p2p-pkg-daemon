@@ -1,0 +1,37 @@
+@startuml
+title UC-06 · Serve Packages (Upload side of a UC-02 transfer)
+ 
+participant "Requesting Daemon\n(remote peer's machine,\nrunning its own UC-02)" as RemotePeer
+participant "Serving Daemon\n(THIS machine)" as Daemon
+participant "pkg cache\n(/var/cache/pkg, read-only)" as Cache
+participant Tracker
+ 
+note over RemotePeer, Daemon : Same transfer as UC-02's fetch loop,\nseen from the uploader's side.\npkg is NOT involved anywhere here —\nthis is daemon-to-daemon traffic.
+ 
+RemotePeer -> Daemon: requestPackage(packageName-version)
+activate Daemon
+ 
+Daemon -> Daemon : validateRequest()
+note right : Network input from an UNTRUSTED\nremote daemon — not user input,\nso not pkg's job. Malformed or\nhostile messages must be rejected\nwithout crashing (fuzzer target,\nper proposal deliverables).
+ 
+Daemon -> Cache: retrieve(packageName-version)
+activate Cache
+ 
+alt [package exists locally]
+Cache --> Daemon: packageBytes
+deactivate Cache
+Daemon --> RemotePeer: streamPackageBytes()
+note over Daemon, RemotePeer: Requester verifies the hash\non its own end (UC-02).
+RemotePeer --> Daemon : transfer complete
+ 
+else [package not found]
+Cache --> Daemon: notFound
+deactivate Cache
+Daemon --> RemotePeer: error("404: package not held")
+Daemon -> Tracker: announce(fullPackageList)
+note right : Full re-announce (UC-05):\nif one entry drifted, others\nmay have too (e.g. pkg clean).\nDaemon never serves data\nit does not hold.
+end
+ 
+deactivate Daemon
+@enduml
+
