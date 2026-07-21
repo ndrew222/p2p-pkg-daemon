@@ -1,3 +1,7 @@
+// Package peerwire is the binary framing for the peer-to-peer data channel.
+// NOTE: ADR-001 pins peer transport to HTTP-over-TCP; this binary format is
+// interim until the v0.2 wire spec lands. The identifier carried in a REQUEST
+// is now a name-version string (not a CID).
 package peerwire
 
 import (
@@ -6,20 +10,17 @@ import (
 	"io"
 )
 
-// Message is one framed message: [type][4-byte length][payload].
 type Message struct {
 	Type    byte
 	Payload []byte
 }
 
 const (
-	MsgRequest byte = 3 // daemon -> peer:   "give me this CID"
+	MsgRequest byte = 3 // daemon -> peer:   "give me this name-version"
 	MsgData    byte = 4 // peer   -> daemon: the package bytes
 	MsgError   byte = 5 // peer   -> daemon: a short error string
 )
 
-// MaxPayload caps how many bytes we allocate for one message, so a hostile
-// length field can never make us allocate unbounded memory
 const MaxPayload = 64 << 20 // 64 MiB
 
 var ErrBadFrame = errors.New("peerwire: malformed frame")
@@ -37,7 +38,6 @@ func Parse(data []byte) (Message, error) {
 		return Message{}, ErrBadFrame
 	}
 	length := binary.BigEndian.Uint32(data[1:5])
-	// guard line
 	if len(data) < 5+int(length) {
 		return Message{}, ErrBadFrame
 	}
@@ -50,7 +50,6 @@ func ReadMessage(r io.Reader) (Message, error) {
 		return Message{}, err
 	}
 	length := binary.BigEndian.Uint32(header[1:5])
-	// guardline
 	if length > MaxPayload {
 		return Message{}, ErrBadFrame
 	}

@@ -5,19 +5,19 @@ import (
 	"log"
 )
 
-// PeerLister returns the addresses of peers holding a CID. For now it returns
-// plain "host:port" strings so this package compiles on its own
+// PeerLister returns the addresses of peers holding a package. It takes a name-version
 type PeerLister interface {
-	Peers(cid string) ([]string, error)
+	Peers(nameVersion string) ([]string, error)
 }
 
-// Download is the fetch entry point (UC-02 / UC-04): ask the lister who holds
-// cid, then try each peer until one returns bytes that verify
-func Download(lister PeerLister, cid string) ([]byte, error) {
-	if !validCID(cid) {
-		return nil, fmt.Errorf("peer: download: %w: %q", ErrBadCID, cid)
+// Download is the fetch entry point (UC-02): ask the lister who holds
+// nameVersion, then try each peer (up to the tracker's cap of 3) until one
+// returns bytes that verify against expectedHash.
+func Download(lister PeerLister, nameVersion, expectedHash string) ([]byte, error) {
+	if !validName(nameVersion) {
+		return nil, fmt.Errorf("peer: download: %w: %q", ErrBadName, nameVersion)
 	}
-	addrs, err := lister.Peers(cid)
+	addrs, err := lister.Peers(nameVersion)
 	if err != nil {
 		return nil, fmt.Errorf("peer: download: %w", err)
 	}
@@ -25,12 +25,12 @@ func Download(lister PeerLister, cid string) ([]byte, error) {
 		return nil, fmt.Errorf("peer: download: %w", ErrNoPeers)
 	}
 	for _, addr := range addrs {
-		data, err := FetchFromPeer(addr, cid)
+		data, err := FetchFromPeer(addr, nameVersion, expectedHash)
 		if err != nil {
 			log.Printf("peer: fetch from %s failed: %v", addr, err)
-			continue // dont trust this holder, try the next
+			continue
 		}
-		log.Printf("peer: fetched cid=%q from %s (%d bytes)", cid, addr, len(data))
+		log.Printf("peer: fetched %q from %s (%d bytes)", nameVersion, addr, len(data))
 		return data, nil
 	}
 	return nil, fmt.Errorf("peer: download: %w", ErrNoPeers)

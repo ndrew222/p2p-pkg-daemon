@@ -8,16 +8,20 @@ import (
 	"github.com/ndrew222/p2p-pkg-daemon/peerwire"
 )
 
-// Store is anything that can look up package bytes by CID
-type Store interface {
-	Get(cid string) ([]byte, bool)
+// PackageSource is the read-only view of pkg's cache the serving side reads
+// from. Per spec the daemon has NO store of its own -- it serves bytes
+// straight from the pkg cache (read-only). Any type that returns the bytes
+// for a name-version satisfies this.
+type PackageSource interface {
+	Get(nameVersion string) ([]byte, bool)
 }
 
-// Server is the part of the daemon that sends packages to other peers (UC-06).
-// Requests come from untrusted machines, so if one sends broken data we just
-// close that connection instead of crashing
+// Server is the serving/seeding side (UC-06). Incoming requests are untrusted
+// network input, so each is validated and a malformed request drops the
+// connection rather than crashing (the fuzz target). No hashing happens here,
+// the requesting daemon verifies on its own end
 type Server struct {
-	Store Store
+	Source PackageSource
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -28,7 +32,6 @@ func (s *Server) ListenAndServe(addr string) error {
 	return s.Serve(ln)
 }
 
-// Serve accepts connections on an existing listener
 func (s *Server) Serve(ln net.Listener) error {
 	log.Printf("peer: seed server listening on %s", ln.Addr())
 	for {
@@ -47,26 +50,26 @@ func (s *Server) handle(conn net.Conn) {
 
 	msg, err := peerwire.ReadMessage(conn)
 	if err != nil {
-		return // malformed / truncated input -> drop quietly, never crash
+		return // malformed / truncated: drop quietly, never crash
 	}
 	if msg.Type != peerwire.MsgRequest {
 		writeError(conn, "expected REQUEST")
 		return
 	}
 
-	cid := string(msg.Payload)
-	if !validCID(cid) {
-		writeError(conn, "malformed cid")
+	nameVersion := string(msg.Payload)
+	if !validName(nameVersion) {
+		writeError(conn, "invalid name-version")
 		return
 	}
 
-	content, ok := s.Store.Get(cid)
+	content, ok := s.Source.Get(nameVersion)
 	if !ok {
-		writeError(conn, "404: not held") // cache may have been cleared since announce
+		writeError(conn, "404: not held") // pkg clean may have removed it since announce
 		return
 	}
 	_, _ = conn.Write(peerwire.Encode(peerwire.Message{Type: peerwire.MsgData, Payload: content}))
-	log.Printf("peer: served cid=%q (%d bytes)", cid, len(content))
+	log.Printf("peer: served %q (%d bytes)", nameVersion, len(content))
 }
 
 func writeError(conn net.Conn, msg string) {

@@ -5,23 +5,24 @@ import (
 	"testing"
 )
 
-type memStore map[string][]byte
+// memSource stands in for the read-only pkg cache.
+type memSource map[string][]byte
 
-func (m memStore) Get(cid string) ([]byte, bool) { b, ok := m[cid]; return b, ok }
+func (m memSource) Get(nameVersion string) ([]byte, bool) { b, ok := m[nameVersion]; return b, ok }
 
 func TestServeAndFetchEndToEnd(t *testing.T) {
 	content := []byte("real end to end package")
-	cid := cidOf(content)
+	name := "jq-1.7"
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	srv := &Server{Store: memStore{cid: content}}
+	srv := &Server{Source: memSource{name: content}}
 	go srv.Serve(ln)
 
-	got, err := FetchFromPeer(ln.Addr().String(), cid)
+	got, err := FetchFromPeer(ln.Addr().String(), name, hashOf(content))
 	if err != nil {
 		t.Fatalf("fetch failed: %v", err)
 	}
@@ -29,7 +30,8 @@ func TestServeAndFetchEndToEnd(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, content)
 	}
 
-	if _, err := FetchFromPeer(ln.Addr().String(), cidOf([]byte("not stored"))); err == nil {
-		t.Fatal("expected error for a CID the peer does not hold")
+	// A package the peer does not hold -> peer returns an error, fetch surfaces it.
+	if _, err := FetchFromPeer(ln.Addr().String(), "notheld-1.0", hashOf(content)); err == nil {
+		t.Fatal("expected error for a package the peer does not hold")
 	}
 }
