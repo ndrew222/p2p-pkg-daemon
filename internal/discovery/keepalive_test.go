@@ -43,28 +43,28 @@ func TestTick(t *testing.T) {
 		wantAnnounces int
 	}{
 		{
-			name:          "empty cache stays quiet",
+			name:          "KA-01: empty cache stays quiet",
 			registered:    false,
 			pingErr:       nil,
 			wantPings:     0,
 			wantAnnounces: 0,
 		},
 		{
-			name:          "registered pings",
+			name:          "KA-02: registered pings",
 			registered:    true,
 			pingErr:       nil,
 			wantPings:     1,
 			wantAnnounces: 0,
 		},
 		{
-			name:          "forgotten reannounces",
+			name:          "KA-03: forgotten reannounces",
 			registered:    true,
-			pingErr:       ErrUnknownPeer,
+			pingErr:       ErrUnknownPeer, // 404
 			wantPings:     1,
 			wantAnnounces: 1,
 		},
 		{
-			name:          "network error just retries",
+			name:          "KA-04: network error just retries",
 			registered:    true,
 			pingErr:       errors.New("connection refused"),
 			wantPings:     1,
@@ -105,28 +105,28 @@ func TestAnnounce(t *testing.T) {
 		wantRegistered  bool
 	}{
 		{
-			name:            "non-empty list registers us",
+			name:            "KA-05 non-empty list registers us",
 			startRegistered: false,
 			cachePkgs:       []string{"nginx-1.24.0"},
 			wantAnnounces:   1,
 			wantRegistered:  true,
 		},
 		{
-			name:            "empty list deregisters us",
+			name:            "KA-06 empty list deregisters us",
 			startRegistered: true,
 			cachePkgs:       nil,
 			wantAnnounces:   1,
 			wantRegistered:  false,
 		},
 		{
-			name:            "scan failure changes nothing",
+			name:            "KA-07 scan failure changes nothing",
 			startRegistered: true,
 			cacheErr:        errors.New("permission denied"),
 			wantAnnounces:   0,
 			wantRegistered:  true,
 		},
 		{
-			name:            "failed announce leaves us unregistered",
+			name:            "KA-08 failed announce leaves us unregistered",
 			startRegistered: false,
 			cachePkgs:       []string{"nginx-1.24.0"},
 			announceErr:     errors.New("connection refused"),
