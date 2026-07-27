@@ -16,26 +16,27 @@ import (
 
 type memStore map[string][]byte
 
-func (m memStore) Get(cid string) ([]byte, bool) { b, ok := m[cid]; return b, ok }
+func (m memStore) Get(nameVersion string) ([]byte, bool) { b, ok := m[nameVersion]; return b, ok }
 
 func main() {
-	// 1. Make a "package" and compute its CID (SHA-256 hex)
+	// 1. Make a "package" and compute its hash (SHA-256 hex)
 	pkg := []byte("pretend this is a real .tgz package payload")
 	sum := sha256.Sum256(pkg)
-	cid := hex.EncodeToString(sum[:])
-	log.Printf("package CID: %s", cid)
+	hash := hex.EncodeToString(sum[:])
+	nameVersion := "nginx-1.24.0_2"
+	log.Printf("package hash: %s, name-version: %s", hash, nameVersion)
 
 	// 2. Start a seeder holding that package (upload side, UC-06)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		log.Fatal(err)
 	}
-	seeder := &peer.Server{Store: memStore{cid: pkg}}
+	seeder := &peer.Server{Source: memStore{nameVersion: pkg}}
 	go seeder.Serve(ln)
 	time.Sleep(100 * time.Millisecond)
 
 	// 3. Download from the seeder and verify (fetch side, UC-04)
-	got, err := peer.FetchFromPeer(ln.Addr().String(), cid)
+	got, err := peer.FetchFromPeer(ln.Addr().String(), nameVersion, hash)
 	if err != nil {
 		log.Fatalf("fetch failed: %v", err)
 	}
