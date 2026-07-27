@@ -23,10 +23,11 @@ var ErrUnknownPeer = errors.New("discovery: tracker does not know this peer")
 
 // Client talks to the tracker on behalf of one daemon.
 type Client struct {
-	trackerURL string       // e.g. "http://127.0.0.1:8080". The base, methods append /announce, /ping, /peers
-	peerID     proto.PeerID // our identity
-	addr       string       // our own host:port, where peers reach us
-	http       *http.Client // reused; carries the timeout
+	trackerURL string        // e.g. "http://127.0.0.1:8080". The base, methods append /announce, /ping, /peers
+	peerID     proto.PeerID  // our identity
+	addr       string        // our own host:port, where peers reach us
+	http       *http.Client  // reused; carries the timeout
+	stopChan   chan struct{} // channel to signal the heartbeat goroutine to stop
 }
 
 // New returns a Client bound to one tracker and one identity
@@ -38,6 +39,7 @@ func New(trackerURL string, peerID proto.PeerID, addr string) *Client {
 		peerID:     peerID,
 		addr:       addr,
 		http:       &http.Client{Timeout: 10 * time.Second},
+		stopChan:   make(chan struct{}),
 	}
 }
 
@@ -177,25 +179,32 @@ func (c *Client) RunHeartbeat(cids func() []string) {
 	// .C is a channel, every 20s a value arrives
 	// for range receives forever
 	// between ticks, the goroutine is parked (descheduled, no CPU consumption)
-	for range ticker.C {
-		err := c.Ping()
-		if err == nil {
-			continue // lease renewed, nothing to do, wait for next tick
-		}
-
-		//errors.Is walks the wrap chain
-		// cids() calls the callback, it fetch the current list right now and announce that
-		if errors.Is(err, ErrUnknownPeer) {
-			log.Printf("discovery: tracker forgot us; re-announcing") // self healing, tracker can be killed and daemon independently notices within 20s and re-registers itself. Rebuild the list
-			if err := c.Announce(cids()); err != nil {
-				log.Printf("discovery: re-announce failed: %v", err) // if reannounce fails, log it and continue. It retries forever at every new tick.
+	for {
+		select {
+		case <-c.stopChan:
+			log.Printf("discovery: heartbeat stopped peer=%q", c.peerID)
+			return
+		case <-ticker.C:
+			err := c.Ping()
+			if err == nil {
+				continue // lease renewed, nothing to do, wait for next tick
 			}
-			continue
+
+			//errors.Is walks the wrap chain
+			// cids() calls the callback, it fetch the current list right now and announce that
+			if errors.Is(err, ErrUnknownPeer) {
+				log.Printf("discovery: tracker forgot us; re-announcing") // self healing, tracker can be killed and daemon independently notices within 20s and re-registers itself. Rebuild the list
+				if err := c.Announce(cids()); err != nil {
+					log.Printf("discovery: re-announce failed: %v", err) // if reannounce fails, log it and continue. It retries forever at every new tick.
+				}
+				continue
+			}
+
+			// Network error, tracker down, etc. Log and keep trying.
+			// this function never returns, it is blocked forever by design in case tracker is unreachable which is to be expected.
+			log.Printf("discovery: ping failed: %v", err)
 		}
 
-		// Network error, tracker down, etc. Log and keep trying.
-		// this function never returns, it is blocked forever by design in case tracker is unreachable which is to be expected.
-		log.Printf("discovery: ping failed: %v", err)
 	}
 
 }
@@ -204,4 +213,9 @@ func (c *Client) RunHeartbeat(cids func() []string) {
 // otherwise io.ReadAll reads until sender stops. If sender never stops, read never stops, allocating forever, leads to memory exhaustion
 func readLimited(r io.Reader) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r, 1<<20))
+}
+
+// Stop shuts down the heartbeat
+func (c *Client) Stop() {
+	close(c.stopChan)
 }

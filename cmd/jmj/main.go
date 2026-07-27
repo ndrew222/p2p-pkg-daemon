@@ -9,9 +9,10 @@ import (
 	"path/filepath"
 	"strings" // strings.Split to turn "aaa, bbb, ccc" into ["aaa", "bbb", "ccc"]
 
-	"github.com/ndrew222/p2p-pkg-daemon/internal/config"    // UC-01
-	"github.com/ndrew222/p2p-pkg-daemon/internal/discovery" // F3 client
-	"github.com/ndrew222/p2p-pkg-daemon/internal/proto"     // needed only for proto.PeerID type conversation
+	"github.com/ndrew222/p2p-pkg-daemon/internal/config" // UC-01
+	"github.com/ndrew222/p2p-pkg-daemon/internal/daemon" // UC-01
+	//"github.com/ndrew222/p2p-pkg-daemon/internal/discovery" // F3 client
+	//"github.com/ndrew222/p2p-pkg-daemon/internal/proto"     // needed only for proto.PeerID type conversation
 )
 
 // TEMPORARY STUB: exists only to exercise internal/discovery end-to-end
@@ -75,6 +76,7 @@ func main() {
 	if *peerID == "" || *cidList == "" {
 		log.Fatal("jmj: -id and -cids  are required")
 	}
+	cids := strings.Split(*cidList, ",")
 
 	// 1. Load config (missing → defaults, corrupt → .bak + defaults)
 	cfg, err := config.Load(*configPath)
@@ -98,21 +100,12 @@ func main() {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
 
-	// 4. Parse CIDs
-	var cidSlice []string
-	if *cidList != "" {
-		cidSlice = strings.Split(*cidList, ",")
+	// Start daemon (this handles everything: client, heartbeat, HTTP server, SIGHUP)
+	if err := daemon.Start(cfg, *peerID, cids, *configPath); err != nil {
+		log.Fatalf("Failed to start daemon: %v", err)
 	}
 
-	// ---- Create discovery client and start heartbeat ----
-	client := discovery.New(cfg.TrackerURL, proto.PeerID(*peerID), cfg.ListenAddr)
-	if err := client.Announce(cidSlice); err != nil {
-		log.Fatalf("Initial announce failed: %v", err)
-	}
-	log.Printf("jmj: peer=%q addr=%q running", *peerID, cfg.ListenAddr)
-
-	// The real daemon will read this from its content store
-	currentCIDs := func() []string { return cidSlice }
-
-	go client.RunHeartbeat(currentCIDs)
+	// ---- BLOCK FOREVER (keep daemon running) ----
+	log.Println("jmj daemon is running. Press Ctrl+C to stop.")
+	select {} // blocks indefinitely
 }

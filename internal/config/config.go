@@ -12,7 +12,7 @@ import (
 	"strconv"
 )
 
-// DaemonConfig holds persistent configuration fields.
+// DaemonConfig holds persistent configuration fields. as JSON tag
 type DaemonConfig struct {
 	TrackerURL string `json:"tracker_url"`
 	ListenAddr string `json:"listen_addr"`
@@ -55,6 +55,7 @@ func Load(path string) (*DaemonConfig, error) {
 
 // Validate checks all fields and returns an error if any is invalid.
 // Validation happens BEFORE any file I/O (per spec).
+// It checks URL, port, directory checks
 func Validate(cfg *DaemonConfig) error {
 	// Tracker URL: must be a valid HTTP/HTTPS URL
 	if _, err := url.ParseRequestURI(cfg.TrackerURL); err != nil {
