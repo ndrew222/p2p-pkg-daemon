@@ -27,14 +27,14 @@ func main() {
 	// read access to pkg's repo DB wired up. Passing nil for now means
 	// SanityFilter only checks that file names look valid; it can't yet
 	// check file sizes against the repo DB.
-	cw := cachewatcher.New(*cacheDir, nil,
-		func(pkgs []cachewatcher.PackageInfo) {
+	cw := daemon.New(*cacheDir, nil,
+		func(pkgs []daemon.PackageInfo) {
 			fmt.Printf("[update] %d packages\n", len(pkgs))
 			for _, p := range pkgs {
 				fmt.Printf("  %s  (%d bytes)\n", p.NameVersion(), p.FileSizeBytes)
 			}
 		},
-		func(ev cachewatcher.ChangeEvent) {
+		func(ev daemon.ChangeEvent) {
 			fmt.Printf("[change] %s: %s  (%d bytes)\n", ev.Type, ev.Package.NameVersion(), ev.Package.FileSizeBytes)
 		},
 	)
