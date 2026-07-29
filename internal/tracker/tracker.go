@@ -173,15 +173,15 @@ func (t *Tracker) Sweep() int {
 	return dropped // to know how many were dropped (int)
 }
 
-// RunSweeper blocks, sweeping on a ticker. Run it in a goroutine.
+// RunSweeper blocks, sweeping on a pinger. Run it in a goroutine.
 // fires repeatedly on an interval
-// every 15s, ticker sends current time down that channel .C
+// every 15s, pinger sends current time down that channel .C
 // no returns, so blocks forever by design, so caller must run it in its own goroutine (go t.RunSweeper())
 // go before a function call starts new goroutine, sweeper runs alongside main at once
 func (t *Tracker) RunSweeper() {
-	ticker := time.NewTicker(SweepInterval)
-	defer ticker.Stop()  // release tickers resource when funcion exits
-	for range ticker.C { // each recieve blocks until next tick arrives so loop body runs exactly once per interval, and between ticks the goroutine is parked (deschedule, no CPU consumption)
+	pinger := time.NewTicker(SweepInterval)
+	defer pinger.Stop()  // release pingers resource when funcion exits
+	for range pinger.C { // each recieve blocks until next ping arrives so loop body runs exactly once per interval, and between pings the goroutine is parked (deschedule, no CPU consumption)
 		t.Sweep()
 
 	}

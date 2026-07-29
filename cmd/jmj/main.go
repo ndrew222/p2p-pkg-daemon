@@ -56,7 +56,7 @@ func main() {
 	// confirmation line
 	log.Printf("jmj: peer=%q addr=%q running", *peerID, *addr)
 
-	// Blocks forever, pinging on a ticker and re-announcing if the tracker forgets us
+	// Blocks forever, pinging on a pinger and re-announcing if the tracker forgets us
 	// passes function currentCIDs as value
 	// RunHeartBeat wamts the function so it can call later when it needs a fresh list
 	// passing the parens currentCIDs() will pass a []string, where a func() []string is wanted

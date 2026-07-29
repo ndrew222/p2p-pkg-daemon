@@ -50,8 +50,8 @@ func (k *KeepAlive) announce() {
 	k.registered = len(pkgs) > 0 // if no pkgs, false, else true
 }
 
-// tick is one beat of the heartbeat.
-func (k *KeepAlive) tick() {
+// ping is one beat of the heartbeat.
+func (k *KeepAlive) ping() {
 	if !k.registered {
 		return // empty cache, stay quiet
 	}
@@ -81,7 +81,7 @@ func (k *KeepAlive) Run(done <-chan struct{}) {
 		case <-k.changed: // cache changed, re-announce
 			k.announce()
 		case <-t.C: // timer fired, ping the tracker
-			k.tick()
+			k.ping()
 		}
 	}
 }

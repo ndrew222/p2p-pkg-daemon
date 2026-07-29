@@ -34,7 +34,7 @@ type fakeCache struct {
 
 func (f *fakeCache) Scan() ([]string, error) { return f.pkgs, f.err }
 
-func TestTick(t *testing.T) {
+func TestPing(t *testing.T) {
 	tests := []struct {
 		name          string
 		registered    bool
@@ -80,7 +80,7 @@ func TestTick(t *testing.T) {
 			k := NewKeepAlive(tr, ca, 9310, nil)
 			k.registered = tc.registered
 
-			k.tick()
+			k.ping()
 
 			if tr.pings != tc.wantPings {
 				t.Errorf("pings = %d, want %d", tr.pings, tc.wantPings)
