@@ -8,7 +8,7 @@ import (
 	"log"      // for sequence diagram arrows
 	"net/http" // HTTP client, not the server
 	"net/url"  // safely building a query string
-	"time"     // ticker and client timeout
+	"time"     // Pinger and client timeout
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/proto"
 )
@@ -169,25 +169,25 @@ func (c *Client) Peers(cid string) ([]proto.PeerInfo, error) {
 	return out.Peers, nil
 }
 
-// RunHeartbeat blocks, pinging on a ticker. Re-announces if the tracker has forgotten us. Run it in a goroutine.
+// RunHeartbeat blocks, ping. Re-announces if the tracker has forgotten us. Run it in a goroutine.
 // cids is a callback so the daemon can report its current CID list at re-announce time, not a stale snapshot from startup.
 // parameter is a function, that when called returns the current CID list, passing it as function instead of string because CID list changes overtime, simply passing as []string only returns a snapshot at startup
 func (c *Client) RunHeartbeat(cids func() []string) {
-	ticker := time.NewTicker(PingInterval)
-	defer ticker.Stop()
+	pinger := time.NewTicker(PingInterval)
+	defer pinger.Stop()
 
 	// .C is a channel, every 20s a value arrives
 	// for range receives forever
-	// between ticks, the goroutine is parked (descheduled, no CPU consumption)
+	// between pings, the goroutine is parked (descheduled, no CPU consumption)
 	for {
 		select {
 		case <-c.stopChan:
 			log.Printf("discovery: heartbeat stopped peer=%q", c.peerID)
 			return
-		case <-ticker.C:
+		case <-pinger.C:
 			err := c.Ping()
 			if err == nil {
-				continue // lease renewed, nothing to do, wait for next tick
+				continue // lease renewed, nothing to do, wait for next ping
 			}
 
 			//errors.Is walks the wrap chain
