@@ -3,3 +3,6 @@
 /jmj
 cmd/*/trac
 cmd/*/jmj
+
+# local drafts, not to be committed
+/.drafts/

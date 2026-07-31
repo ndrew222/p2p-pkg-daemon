@@ -185,3 +185,124 @@ curl -X POST http://127.0.0.1:9001/ping
 
 # 7. Graceful shutdown for daemon
 kill -TERM $(pgrep jmj)
+```
+
+## Update 2026-07-31: Fail-fast validation fix
+
+During a review of `cmd/jmj/main.go` against `docs/uc-01.puml`, a deviation was found:
+
+**Problem**: The daemon mode called `config.Load()` *before* `config.Validate()`. `Load()` reads the config file and, on a corrupt file, renames it to `config.bak` — a disk write. This violated the diagram's `validateArgs()` note: *"Fail fast, before touching disk"* / *"Config file untouched"*. Verified with a test: a corrupt config plus an invalid `-addr` (port 80) produced `config.json.bak` even though the args were rejected.
+
+**Fix**: Validate the requested settings *first*, before any config-file I/O:
+1. Build a candidate config from `config.DefaultConfig()` + flag overrides.
+2. `config.Validate(candidate)` — fail fast; invalid args exit before the file is read.
+3. Only then `config.Load(path)` (missing → defaults, corrupt → `.bak` + defaults).
+4. Re-merge flag overrides and `config.Validate` again to catch invalid values inside the file.
+
+Refactored the duplicate override logic into `applyOverrides(cfg, tracker, addr, buffer)`.
+
+**Verification**:
+- Corrupt config + invalid args → error, `config.json` left untouched (no `.bak`). ✓
+- Corrupt config + valid args → `.bak` created, defaults used. ✓
+- Happy path: `-tracker` override merged, `listen_addr` kept from file, announce + `/peers` lookup work. ✓
+- `go build`, `go vet`, `go test ./...` all green.
+
+## Update 2026-07-31: Unit tests against the sequence diagram + Reload deadlock fix
+
+### Deadlock fix (found while writing tests)
+
+`Daemon.Reload()` in `internal/daemon/daemon.go` held `d.mu` and then called
+`startHTTPServer()` / `startDiscovery()`, both of which lock `d.mu` again.
+`sync.Mutex` is not reentrant, so any SIGHUP reload that changed `listen_addr`
+or `tracker_url` **deadlocked**. The reload tests would have hung forever on the
+old code.
+
+**Fix**: `Reload()` now releases `d.mu` before calling the re-locking helpers.
+The read/validate/merge still happens under the lock; the restarts happen after
+it. (Uncertainty resolved: this is a clear bug, not a spec ambiguity — the UC-01
+diagram requires hot reload to work.)
+
+### New test files
+
+**`internal/config/config_test.go`** (table-driven, no binary):
+- `TestDefaultConfig` — the 3 defaults
+- `TestLoadReadable` — R1 (readable file → currentSettings)
+- `TestLoadMissing` — R2 (missing → defaults, **file stays absent**)
+- `TestLoadCorrupt` — R3 (corrupt → `.bak` preserves original bytes, defaults)
+- `TestValidate` — URL / port range (1024–65535) / buffer-dir writability, pos+neg
+- `TestSaveAndLoadRoundTrip` — Save writes what Load reads
+
+**`internal/daemon/daemon_test.go`** (constructs `Daemon` in-package; fake
+tracker = `net/http/httptest`):
+- `TestReloadListenAddrChange` — H1 (server restarts on new addr, old addr closes)
+- `TestReloadTrackerChange` — H2 (re-announces to the new tracker)
+- `TestReloadInvalidFile` — H3 (invalid file rejected, old settings stay)
+- `TestReloadCorruptFile` — H4 (corrupt → `.bak`, defaults applied)
+- `TestReloadDropsCLIOverrides` — H5 (see flagged caveat below)
+- `TestStartAnnounces` — R8 (Start announces → "peer registered", health endpoint up)
+- `TestStop` — servers and heartbeat close cleanly
+
+### Flagged to spec owner (open question)
+
+**H5 — SIGHUP drops startup CLI overrides.** `Reload()` reads only the config
+file, so a `-tracker X` / `-addr Y` flag given at startup is silently reverted to
+the file's value on the next SIGHUP. `TestReloadDropsCLIOverrides` pins the
+current behaviour. Decision needed: is "file wins" intended (flags are
+startup-only), or should Reload re-apply the startup flags?
+
+### Not unit-testable without the binary (covered by the manual commands above)
+
+- G1–G3: `--generate-config` stdout/exit codes — logic in `func main()`
+- R4: fail-fast *ordering* (file untouched on invalid args) — ordering in `func main()`
+- R7: `-id`/`-cids` required check — in `func main()`
+
+We deliberately did **not** refactor the flow out of `main.go` (kept as-is), and
+integration tests are out of scope for now, so these branches stay manual-verified.
+
+## Full test-case matrix (mapped to the UC-01 sequence diagram)
+
+Naming: **G** = Generate-config section, **R** = Run-daemon section, **H** =
+Hot-reload section. Status column: `unit test` = covered by an automated unit
+test, `manual` = verified by hand only (logic lives in `func main()`, no
+refactor done).
+
+### Generate config — `jmj --generate-config [-tracker] [-addr] [-buffer]`
+
+| # | Sequence-diagram branch | Test case | Workflow it fits | Status |
+|---|------------------------|-----------|------------------|--------|
+| G1 | args valid → JSON on stdout | run with valid `-tracker`/`-addr`/`-buffer` → full JSON config printed to stdout, exit 0 | `jmj --generate-config \| sudo tee config.json` | manual |
+| G2 | invalid setting → error, stdout empty | bad port (80), bad URL, or unwritable buffer dir → error on stderr, exit 1, nothing on stdout | user typos a flag while generating | manual |
+| G3 | defaults (no flags) | run with no flags → all 3 defaults (`tracker_url`, `listen_addr`, `buffer_dir`) emitted | quick throwaway config | manual |
+
+### Run daemon — `jmj -id <peer-id> -cids <list> [-config <path>]`
+
+| # | Sequence-diagram branch | Test case | Workflow it fits | Status |
+|---|------------------------|-----------|------------------|--------|
+| R1 | readConfig → file readable | config file contains settings → those settings are used | run after generating a config | unit test `TestLoadReadable` |
+| R2 | file missing → notFound | no config file → defaults used, and the daemon does **not** create the file | first run before any config exists | unit test `TestLoadMissing` |
+| R3 | file corrupted → moveTo("config.bak") | garbage file → renamed to `.bak` (bytes preserved), defaults used | config file got mangled | unit test `TestLoadCorrupt` |
+| R4 | invalid setting → config untouched | corrupt file + invalid `-addr` → error, and the file is **not** renamed (fail-fast happens before any disk I/O) | typo'd a flag while a bad config file happens to exist | manual (ordering lives in `func main`) |
+| R5 | merge(currentSettings ?: defaults, changedKeys) | file has `listen_addr`, pass only `-tracker` → tracker overridden, listen_addr kept | override one field without rewriting the whole file | manual (merge logic in `func main`) |
+| R6 | no write-back | after the daemon runs, the config file is byte-identical | confirms the daemon treats the file as read-only | manual |
+| R7 | `-id`/`-cids` required | run with either missing → error before any file I/O | forgot the identity flags | manual (in `func main`) |
+| R8 | announce → acknowledgement (peer registered) | `Start()` against a fake tracker → `/announce` received, health endpoint up | the "configured and ready" handoff | unit test `TestStartAnnounces` |
+
+### Hot reload — `kill -SIGHUP <pid>`
+
+| # | Sequence-diagram branch | Test case | Workflow it fits | Status |
+|---|------------------------|-----------|------------------|--------|
+| H1 | apply: listen_addr changed | edit file, `Reload()` → HTTP server restarts and answers on the new port; old port closes | edit config while running and apply it | unit test `TestReloadListenAddrChange` |
+| H2 | apply: tracker_url changed | edit file, `Reload()` → re-announces to the **new** tracker | pointing the daemon at a different tracker | unit test `TestReloadTrackerChange` |
+| H3 | invalid file → old settings stay | invalid config file, `Reload()` returns error, old settings still in effect | bad edit; no restart needed | unit test `TestReloadInvalidFile` |
+| H4 | corrupt file on reload | corrupt config → `.bak` created, defaults applied | mangled file while running | unit test `TestReloadCorruptFile` |
+| H5 | apply(settings) — file wins | start with `-tracker X` (file has Y), `Reload()` → config reverts to Y; startup CLI override is **not** re-applied | documents current behavior (see flagged caveat above) | unit test `TestReloadDropsCLIOverrides` |
+
+### Gaps (not covered by any test)
+
+- **G1–G3, R4, R7**: live in `func main()` (`cmd/jmj/main.go`) — need the binary
+  or a refactor; integration tests are out of scope for now.
+- **R5, R6**: merge and no-write-back are done inline in `func main()` too, so
+  they have no unit test yet either.
+- **SIGHUP signal delivery itself**: the reload *logic* is tested by calling
+  `Reload()` directly; actually sending the `kill -SIGHUP` signal to a process
+  is only covered by the manual commands in "Testing Commands".

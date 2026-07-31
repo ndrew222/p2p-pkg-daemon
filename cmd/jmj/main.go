@@ -78,24 +78,24 @@ func main() {
 	}
 	cids := strings.Split(*cidList, ",")
 
-	// 1. Load config (missing → defaults, corrupt → .bak + defaults)
+	// 1. Fail fast: validate requested settings BEFORE touching the config file.
+	//    Per UC-01, invalid args must leave the config file untouched.
+	candidate := config.DefaultConfig()
+	applyOverrides(candidate, *tracker, *addr, *buffer)
+	if err := config.Validate(candidate); err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
+	}
+
+	// 2. Load config (missing → defaults, corrupt → .bak + defaults)
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Error loading config: %v", err)
 	}
 
-	// 2. Merge flag overrides (only if flag was explicitly provided)
-	if *tracker != "" {
-		cfg.TrackerURL = *tracker
-	}
-	if *addr != "" {
-		cfg.ListenAddr = *addr
-	}
-	if *buffer != "" {
-		cfg.BufferDir = *buffer
-	}
+	// 3. Merge flag overrides (only if flag was explicitly provided)
+	applyOverrides(cfg, *tracker, *addr, *buffer)
 
-	// 3. Validate merged config
+	// 4. Validate merged config (catches invalid values from the config file)
 	if err := config.Validate(cfg); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
@@ -108,4 +108,17 @@ func main() {
 	// ---- BLOCK FOREVER (keep daemon running) ----
 	log.Println("jmj daemon is running. Press Ctrl+C to stop.")
 	select {} // blocks indefinitely
+}
+
+// applyOverrides sets config fields only for flags the user explicitly provided.
+func applyOverrides(cfg *config.DaemonConfig, tracker, addr, buffer string) {
+	if tracker != "" {
+		cfg.TrackerURL = tracker
+	}
+	if addr != "" {
+		cfg.ListenAddr = addr
+	}
+	if buffer != "" {
+		cfg.BufferDir = buffer
+	}
 }

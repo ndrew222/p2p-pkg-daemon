@@ -130,17 +130,19 @@ func (d *Daemon) setupReloadHandler() {
 
 // Reload reloads the config from file and applies changes without restarting
 func (d *Daemon) Reload() error {
+	// Read and validate while holding the lock, then release it before calling
+	// startHTTPServer/startDiscovery: those lock d.mu themselves, and sync.Mutex
+	// is not reentrant (holding it here would deadlock).
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Load new config
 	newCfg, err := config.Load(d.configPath)
 	if err != nil {
+		d.mu.Unlock()
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// Validate
 	if err := config.Validate(newCfg); err != nil {
+		d.mu.Unlock()
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
@@ -150,6 +152,7 @@ func (d *Daemon) Reload() error {
 
 	// Update config
 	d.config = newCfg
+	d.mu.Unlock()
 
 	// If address changed, restart HTTP server
 	if addrChanged {
