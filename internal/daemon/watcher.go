@@ -21,7 +21,7 @@ const packageFileExtension = ".pkg"
 
 // PackageInfo represents a discovered package in the cache directory.
 type PackageInfo struct {
-	// Name is the package name, e.g. "nginx" 
+	// Name is the package name, e.g. "nginx"
 	Name string `json:"name"`
 
 	// Version is the version string, e.g. "1.24.0"
@@ -32,7 +32,7 @@ type PackageInfo struct {
 
 	// FileSizeBytes is the size of the file on disk, in bytes. This is
 	// what SanityFilter compares against the repository database's
-	// expected size 
+	// expected size
 	FileSizeBytes int64 `json:"file_size_bytes"`
 }
 
