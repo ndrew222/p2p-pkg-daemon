@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -185,8 +186,16 @@ func TestChangeEvent(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.WriteFile(filepath.Join(tmpDir, "test-1.0.0.pkg"), []byte("x"), 0644)
 
-	var events []ChangeEvent
+	// onChange fires on the watcher's own goroutine, so the slice needs a lock
+	// on both sides: Stop() does not establish a happens-before edge with the
+	// test goroutine, and -race flags the unsynchronised read otherwise.
+	var (
+		mu     sync.Mutex
+		events []ChangeEvent
+	)
 	cw := New(tmpDir, nil, func(pkgs []PackageInfo) {}, func(ev ChangeEvent) {
+		mu.Lock()
+		defer mu.Unlock()
 		events = append(events, ev)
 	})
 
@@ -199,6 +208,9 @@ func TestChangeEvent(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	cw.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
 
 	foundAdded := false
 	for _, ev := range events {
