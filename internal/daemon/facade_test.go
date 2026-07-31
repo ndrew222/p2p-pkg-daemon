@@ -233,6 +233,52 @@ func TestFacadeNeverServesUnverifiedBytes(t *testing.T) {
 	}
 }
 
+// Everything above drives the handler directly. pkg is a real HTTP client on
+// a real socket, so at least one path is worth exercising over the wire: it is
+// the only way the status line, headers and body are actually serialised.
+func TestFacadeOverRealHTTP(t *testing.T) {
+	const pkgName = "nginx-1.24.0_2"
+	content := []byte("package bytes over the wire")
+
+	f := &Facade{
+		Peers:  fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
+		Hashes: fakeHashes{pkgName: sha256Hex(content)},
+	}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+
+	// The worked mirror URL from the spec, against the daemon.
+	resp, err := http.Get(srv.URL + "/stable/FreeBSD:15:amd64/latest/All/nginx-1.24.0_2.pkg")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.ContentLength; got != int64(len(content)) {
+		t.Errorf("Content-Length = %d, want %d", got, len(content))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != string(content) {
+		t.Errorf("body = %q, want %q", body, content)
+	}
+
+	// UC-07 over the same wire: metadata must not be served.
+	metaResp, err := http.Get(srv.URL + "/stable/FreeBSD:15:amd64/latest/meta.conf")
+	if err != nil {
+		t.Fatalf("GET meta.conf: %v", err)
+	}
+	defer metaResp.Body.Close()
+	if metaResp.StatusCode != http.StatusNotFound {
+		t.Errorf("meta.conf status = %d, want 404", metaResp.StatusCode)
+	}
+}
+
 func TestFacadeCheck(t *testing.T) {
 	if err := (&Facade{}).Check(); err == nil {
 		t.Error("Check() on an empty facade = nil, want an error")
