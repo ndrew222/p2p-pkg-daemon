@@ -106,6 +106,8 @@ func main() {
 	}
 
 	// ---- BLOCK FOREVER (keep daemon running) ----
+	// daemon.Start already launched the heartbeat goroutine (discovery.RunHeartbeat),
+	// so main just parks here.
 	log.Println("jmj daemon is running. Press Ctrl+C to stop.")
 	select {} // blocks indefinitely
 }
