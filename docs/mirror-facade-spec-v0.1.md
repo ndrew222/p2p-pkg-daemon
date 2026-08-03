@@ -1,8 +1,11 @@
 # Mirror Facade Spec — v0.1
 
-*The pkg↔daemon HTTP surface (UC-02, UC-07). This is a separate wire from the
-tracker protocol: `tracker-protocol-spec-v0.2.md` governs daemon↔tracker and
-says nothing about this surface.*
+*The pkg↔daemon HTTP surface (UC-02, UC-07). This is one of three separate
+wires: `tracker-protocol-spec-v0.2.md` governs daemon↔tracker and
+`peer-transfer-spec-v0.2.md` governs daemon↔daemon. Neither says anything about
+this surface, and the path rule below is **not** shared with either — the peer
+wire uses its own `/pkg/<name-version>` namespace precisely so that a seeding
+daemon is not a syntactically valid pkg mirror.*
 
 **Status: drafted by an implementing agent at the spec owner's instruction, not
 by the spec owner.** The path rule below is derived from one worked example
@@ -114,19 +117,29 @@ it, but a human running `curl` against the daemon should not get a blank page.
 
 ## Open questions — not resolved here
 
-1. **`HEAD` requests.** Currently `405`. The facade cannot answer a `HEAD`
-   honestly without performing the whole fetch (it does not know the size until
-   it has the bytes), and answering dishonestly risks pkg believing a size it
-   will not receive. Whether pkg issues `HEAD` against mirrors at all must be
-   settled by the UC-07 integration smoke test.
+1. **`HEAD` requests.** Currently `405`. The stated objection was that the
+   facade cannot answer a `HEAD` honestly without performing the whole fetch,
+   because it does not know the size until it has the bytes. That premise no
+   longer holds: `packages.pkgsize` gives the exact size from the same
+   repository-database row as the hash, and `peer-transfer-spec-v0.2.md` relies
+   on it. The facade could therefore answer `HEAD` truthfully without fetching
+   anything. Still **open**, because the remaining question — whether pkg
+   issues `HEAD` against mirrors at all, and what it does with the answer — is
+   for the UC-07 integration smoke test, not for this spec.
 2. **Hash format.** The facade asks the repository database for a hex SHA-256
    string, matching the assumption already isolated in `internal/peer/fetch.go`.
    Unratified.
 3. **Repository database access.** No reader exists. The facade depends on the
    `PackageHashes` interface and is wired with a `nil` implementation until one
    lands, in which case every package-file request answers `404`.
-4. **Temp buffer.** UC-02 §8 calls for streaming into the configured buffer
+4. **Temp buffer.** ~~UC-02 §8 calls for streaming into the configured buffer
    directory. The current fetch path buffers in memory, so `BufferDir` is
-   unused by the facade. Fixing this is a change to `internal/peer`, not here.
+   unused by the facade.~~ **Resolved** by `peer-transfer-spec-v0.2.md`: the
+   fetch path streams into `os.CreateTemp` under a configurable temp directory
+   and hashes incrementally, and `peer.FetchFromPeer` returns the open file
+   rather than a byte slice. The facade copies that file to pkg and removes it.
+   A `[]byte` return would have silently reintroduced whole-package residency
+   at this layer, which is why the signature change matters here and not only
+   in `internal/peer`.
 5. **Range requests.** pkg may issue them for resumed downloads. Unhandled;
    the facade ignores `Range` and returns the whole file with `200`.
