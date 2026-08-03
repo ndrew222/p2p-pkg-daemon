@@ -40,27 +40,50 @@ func DefaultConfig() *DaemonConfig {
 	}
 }
 
-// Load reads JSON config from path. If file is missing, returns defaults.
-// If file is corrupt, moves it to .bak and returns defaults (non-fatal).
-func Load(path string) (*DaemonConfig, error) {
+// read parses the config at path with NO side effects: nothing is created,
+// moved or written, and a corrupt file is left exactly where it is. It reports
+// whether the file was corrupt so Load can decide what to do about it.
+//
+// A missing file is not an error; it just means defaults.
+//
+// Fields absent from the JSON keep their default rather than becoming the zero
+// value, because unmarshalling happens on top of DefaultConfig(). That is what
+// lets a config written by an older build keep working: it has no cache_dir
+// key, so it picks up the default instead of an empty path.
+func read(path string) (cfg *DaemonConfig, corrupt bool, err error) {
+	out := DefaultConfig()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Missing config is not an error – use defaults.
-			return DefaultConfig(), nil
+			// Missing config is not an error - use defaults.
+			return out, false, nil
 		}
-		return nil, fmt.Errorf("reading config: %w", err)
+		return nil, false, fmt.Errorf("reading config: %w", err)
 	}
 
-	var cfg DaemonConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		// Corrupt config: move to .bak and treat as missing.
-		bakPath := path + ".bak"
-		_ = os.Rename(path, bakPath) // ignore rename error; we still return defaults
-		return DefaultConfig(), nil
+	if err := json.Unmarshal(data, out); err != nil {
+		return DefaultConfig(), true, nil
 	}
+	return out, false, nil
+}
 
-	return &cfg, nil
+// Load is read plus the one repair the daemon performs at startup: a corrupt
+// config is moved aside to .bak, preserved for inspection, and the daemon
+// comes up on defaults.
+//
+// The rename is best effort. With no write permission on the config directory
+// the daemon carries on with defaults rather than failing -- jmj never
+// requires write access to its config path.
+func Load(path string) (*DaemonConfig, error) {
+	cfg, corrupt, err := read(path)
+	if err != nil {
+		return nil, err
+	}
+	if corrupt {
+		_ = os.Rename(path, path+".bak")
+	}
+	return cfg, nil
 }
 
 // ValidateFields checks everything that can be judged from the values alone.
@@ -136,11 +159,7 @@ func Validate(cfg *DaemonConfig) error {
 	return nil
 }
 
-// Save and write the Json condig to the file For generator only
-func Save(path string, cfg *DaemonConfig) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
+// There is deliberately no Save. jmj never writes its own config file: the
+// generator prints to stdout and the user redirects it wherever they have
+// permission to write. That is what keeps jmj free of any privilege handling
+// on the config path. Re-adding a writer would put it straight back.

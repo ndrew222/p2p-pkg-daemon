@@ -4,35 +4,35 @@
  
 | UC-01 | Configure P2P Daemon |  |  |
 | :---- | ----- | :---- | ----- |
-| **Description** | The user configures the P2P daemon via the `p2ppkg` CLI, supplying settings such as the tracker address, the daemon's temporary buffer directory, and the listen port. Configuration is a partial update: requested fields override, all other fields keep their existing values, or defaults if no readable config exists. On success the daemon loads the new configuration and registers with the tracker (UC-05). |  |  |
+| **Description** | The user configures the P2P daemon by generating a config file: `jmj -generate-config` writes a complete, valid configuration to **stdout**, and the user redirects it wherever they have permission to write. Settings such as the tracker address, the daemon's temporary buffer directory, the pkg cache directory and the listen port are supplied as flags; anything not supplied takes its default. The daemon then reads that file at startup and registers with the tracker (UC-05). |  |  |
 | **Actors** | Primary | User (operating the local machine) |  |
 |  | Secondary | Tracker (receives the registration ping; it is not set up by this use case) |  |
-| **Trigger** | User invokes `p2ppkg` with configuration arguments |  |  |
+| **Trigger** | User invokes `jmj -generate-config` with configuration arguments, then starts (or reloads) the daemon |  |  |
 | **Precondition** | Daemon is installed. The config file may be present, missing, or corrupt — all three are handled. |  |  |
-| **Postcondition** | Config file contains the previous settings (or defaults) overlaid with the requested changes; daemon is running with the new configuration and is registered with the tracker. |  |  |
-| **Error States** | 1 | Invalid setting value (bad port range, malformed tracker address, nonexistent directory) |  |
-|  | 2 | Configuration file unwritable (permissions) |  |
+| **Postcondition** | The user holds a complete config file containing the defaults overlaid with the requested flags; the daemon is running with that configuration and is registered with the tracker. |  |  |
+| **Error States** | 1 | Invalid setting value (bad port range, malformed tracker address) |  |
+|  | 2 | Invalid environment at startup (buffer directory not writable, pkg cache directory missing) |  |
 |  | 3 | Corrupted configuration file — recoverable, handled inline, not an abort |  |
 | **Operational Flow** | **Step** | **Action** |  |
-|  | 1 | User calls `p2ppkg` with arguments dictating the desired settings |  |
-|  | 2 | Daemon validates all arguments before any file I/O (port range, directory existence, address format) |  |
-|  | 3 | Daemon reads the existing config file: readable → current settings become the merge base; missing → not an error, defaults become the merge base; corrupted → see flow c |  |
-|  | 4 | Daemon merges: requested fields override; unspecified fields keep their existing value, or the default if there was no readable file. A fresh config is simply this merge with a defaults base, so the user's requested settings are never discarded |  |
-|  | 5 | Daemon writes the merged config |  |
-|  | 6 | Daemon loads the new configuration into memory (hot reload; no restart required) |  |
-|  | 7 | Daemon pings the tracker. A first-time configuration is by definition an unknown IP, so this triggers the full registration exchange of UC-05 |  |
-|  | 8 | Daemon reports "configured and ready" to the user |  |
+|  | 1 | User calls `jmj -generate-config` with flags dictating the desired settings |  |
+|  | 2 | jmj validates the values alone — port range, address format, tracker URL, paths non-empty. No filesystem access, so a config can be generated on one machine for another |  |
+|  | 3 | jmj prints the complete config as JSON to stdout and exits. **It reads no config file, creates nothing, and writes nothing.** The generator has no side effects and needs no write permission anywhere |  |
+|  | 4 | The user redirects the output to a path they can write: `jmj -generate-config > ~/.config/jmj/config.json`, or `jmj -generate-config \| sudo tee /usr/local/etc/jmj.json`. Privilege handling, if any is needed at all, belongs to the shell and never to jmj |  |
+|  | 5 | User starts the daemon, or sends SIGHUP to a running one (hot reload; no restart required) |  |
+|  | 6 | Daemon reads the config file: readable → those settings, with any absent key taking its default; missing → not an error, defaults throughout; corrupted → see flow c |  |
+|  | 7 | Daemon validates the loaded config against **this** machine: the buffer directory is created if absent and probed for writability; the pkg cache directory must already exist and is never created, because it is read-only to the daemon |  |
+|  | 8 | Daemon pings the tracker. A first-time configuration is by definition an unknown IP, so this triggers the full registration exchange of UC-05 |  |
 | **Alternative Flow** | **Error State:** Invalid setting value |  |  |
 |  | **Step** | **Action** |  |
 |  | 2a | Validation fails; error message names the offending field |  |
-|  | 3a | Abort; config file untouched (no disk I/O has occurred yet) |  |
-|  | **Error State:** Configuration file unwritable |  |  |
-|  | 5b | Writing the config returns permission denied |  |
-|  | 6b | Error message indicating the permission issue on the config path; previous configuration unchanged |  |
+|  | 3a | Abort with a non-zero exit and nothing on stdout, so a redirect produces an empty file rather than a corrupt config |  |
+|  | **Error State:** Invalid environment at startup |  |  |
+|  | 7b | The buffer directory cannot be created or written, or the pkg cache directory does not exist |  |
+|  | 8b | Daemon refuses to start and names the offending path. The config file is untouched — the daemon never writes it |  |
 |  | **Error State:** Corrupted configuration file |  |  |
-|  | 3c | Reading the config returns a parse error |  |
-|  | 4c | File is moved to config.bak (preserved for inspection) and treated as missing; the merge proceeds with defaults as base — main flow resumes at step 4 |  |
-| **Assumptions/ Comments** | The tracker address must be configured before any peer interaction is possible. Defaults are valid by construction, so only user-supplied values need validation. The daemon holds write permission only on its own temporary buffer directory and the config path; everything else it touches (pkg cache, repository database) is read-only. |  |  |
+|  | 6c | Reading the config returns a parse error |  |
+|  | 7c | Daemon comes up on defaults and makes a best-effort attempt to move the file aside to config.bak for inspection. The move is not required to succeed: with no write permission on the config directory the daemon logs it and carries on, because jmj never requires write access to its config path — main flow resumes at step 7 |  |
+| **Assumptions/ Comments** | The tracker address must be configured before any peer interaction is possible. Defaults are valid by construction, so only user-supplied values need validation. **jmj requires no write privileges to be configured:** the generator emits to stdout and the shell performs the write, which is why there is no permission-error path in the generator and no config writer in the codebase. At runtime the daemon writes only to its own temporary buffer directory; everything else it touches (config path, pkg cache, repository database) is read-only, the config path aside from the best-effort .bak move above. |  |  |
  
 ---
  

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,12 +105,13 @@ func TestDefaultConfigCacheDir(t *testing.T) {
 	}
 }
 
-// A config written by an older build has no cache_dir. It must load rather
-// than fail, so the daemon can report a useful validation error instead of
-// treating the whole file as corrupt and silently renaming it to .bak.
-func TestLoadConfigWithoutCacheDir(t *testing.T) {
+// A config written by an older build has no cache_dir key at all. It must keep
+// working: absent keys take the default rather than the zero value, so the
+// user is not handed an empty path and a validation failure for a file they
+// never edited.
+func TestConfigWithoutCacheDirTakesTheDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	old := `{"tracker_url":"http://127.0.0.1:8080","listen_addr":"127.0.0.1:9001","buffer_dir":"/tmp/jmj"}`
+	old := `{"tracker_url":"http://10.0.0.1:8080","listen_addr":"127.0.0.1:9002","buffer_dir":"/tmp/jmj"}`
 	if err := os.WriteFile(path, []byte(old), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -118,15 +120,16 @@ func TestLoadConfigWithoutCacheDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.TrackerURL != "http://127.0.0.1:8080" {
+	// Keys the file does have still win over the defaults.
+	if cfg.TrackerURL != "http://10.0.0.1:8080" {
 		t.Errorf("tracker_url = %q, want the value from the file", cfg.TrackerURL)
 	}
-	if cfg.CacheDir != "" {
-		t.Errorf("cache_dir = %q, want empty for a pre-cache_dir config", cfg.CacheDir)
+	if cfg.ListenAddr != "127.0.0.1:9002" {
+		t.Errorf("listen_addr = %q, want the value from the file", cfg.ListenAddr)
 	}
-	// And an empty cache_dir must not pass validation.
-	if err := Validate(cfg); err == nil {
-		t.Error("Validate() with an empty cache_dir = nil, want an error")
+	// The key it lacks takes the default.
+	if cfg.CacheDir != "/var/cache/pkg" {
+		t.Errorf("cache_dir = %q, want the default", cfg.CacheDir)
 	}
 	// The file must still be there -- an old-but-parsable config is not
 	// corrupt, so Load must not have moved it aside.
@@ -145,21 +148,79 @@ func TestLoadMissingConfigReturnsDefaults(t *testing.T) {
 	}
 }
 
-func TestSaveRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+// What -generate-config prints must be what the loader reads back. The generator
+// emits JSON to stdout and the user redirects it, so the encoder and the
+// parser are the round trip -- there is no Save in between, deliberately.
+func TestGeneratedConfigRoundTrips(t *testing.T) {
 	want := validConfig(t)
 
-	if err := Save(path, want); err != nil {
-		t.Fatalf("Save: %v", err)
+	generated, err := json.MarshalIndent(want, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	got, err := Load(path)
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, generated, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := read(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if *got != *want {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+// read must not touch the disk, including for a corrupt file. -generate-config
+// depends on this: generating a config must never modify one.
+func TestReadHasNoSideEffects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	const garbage = `{"tracker_url": NOT JSON`
+	if err := os.WriteFile(path, []byte(garbage), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, corrupt, err := read(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !corrupt {
+		t.Error("read did not report a corrupt file")
+	}
+	if cfg.TrackerURL != DefaultConfig().TrackerURL {
+		t.Errorf("corrupt file did not fall back to defaults: %+v", cfg)
+	}
+
+	// The file is exactly as it was, and no .bak appeared beside it.
+	back, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read moved or deleted the config: %v", err)
+	}
+	if string(back) != garbage {
+		t.Errorf("read rewrote the config: %q", back)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Error("read created a .bak; that repair belongs to Load, not read")
+	}
+}
+
+// Load is the daemon-startup path and does perform that one repair.
+func TestLoadMovesCorruptConfigAside(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`not json`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.CacheDir != want.CacheDir {
-		t.Errorf("cache_dir = %q, want %q", got.CacheDir, want.CacheDir)
+	if cfg.TrackerURL != DefaultConfig().TrackerURL {
+		t.Errorf("corrupt config did not fall back to defaults: %+v", cfg)
 	}
-	if got.BufferDir != want.BufferDir || got.ListenAddr != want.ListenAddr {
-		t.Errorf("round trip lost a field: %+v", got)
+	if _, err := os.Stat(path + ".bak"); err != nil {
+		t.Errorf("corrupt config was not preserved as .bak: %v", err)
 	}
 }

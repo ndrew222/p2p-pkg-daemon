@@ -64,8 +64,13 @@ Commit and branch naming: no convention, use your judgment.
 
 - `pkg` is never modified, wrapped, or patched. Integration surface = mirror HTTP.
 - The tracker never relays package bytes and never verifies content.
-- The daemon writes only to its own temp buffer directory and config path.
+- The daemon writes only to its own temp buffer directory.
   The pkg cache and repository database are read-only.
+- jmj requires no write privileges to be configured. `-generate-config` prints
+  a config to stdout with no side effects and the user redirects it; there is
+  no config writer in the codebase and no permission handling. Do not add one.
+  (The sole exception: the daemon makes a best-effort move of a corrupt config
+  to `.bak` at startup, and carries on with defaults if that fails.)
 - Announce lists are always full replacements, never deltas.
 - No hashing at announce time; sanity checks only. The downloader verifies.
 - Peer blacklisting is local-only; nothing is reported to the tracker.

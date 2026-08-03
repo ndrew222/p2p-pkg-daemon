@@ -40,8 +40,23 @@ func main() {
 	}
 
 	// ---- GENERATOR MODE ----
+	//
+	// Generates a config and prints it. That is the whole job: nothing is
+	// created, moved or written, so jmj needs no write permission anywhere
+	// and there is no permission handling to get wrong. The user redirects
+	// the output to wherever they can write:
+	//
+	//	jmj -generate-config -tracker http://10.0.0.1:8080 > config.json
+	//	jmj -generate-config | sudo tee /usr/local/etc/jmj.json
 	if *genConfig {
+		// Defaults plus whatever the user asked for. The existing config
+		// is deliberately NOT read as a merge base: the usual invocation
+		// redirects onto that very file, and the shell truncates a
+		// redirect target before jmj is even started, so the "existing"
+		// config would already be an empty file. Flags are how you say
+		// what you want; defaults are valid by construction.
 		cfg := config.DefaultConfig()
+
 		if *tracker != "" {
 			cfg.TrackerURL = *tracker
 		}
@@ -54,13 +69,15 @@ func main() {
 		if *cache != "" {
 			cfg.CacheDir = *cache
 		}
-		// Fields only: the generator writes a config for whatever host
-		// will run it, so it must not demand that this host already has
-		// the pkg cache or be willing to create the buffer directory.
+
+		// Fields only: the generator produces a config for whatever host
+		// will run the daemon, so it must not demand that THIS host
+		// already has the pkg cache, and must not create anything.
 		if err := config.ValidateFields(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
 			os.Exit(1)
 		}
+
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(cfg); err != nil {
