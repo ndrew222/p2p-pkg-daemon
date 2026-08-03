@@ -199,6 +199,35 @@ Other changes:
   `Post`.
 - Success is `200`, not `204`.
 
+## Commit 5 — call sites, and the gate back to green
+
+Mechanical, except where noted.
+
+- `cmd/jmj` loses `-id` and renames `-cids` to `-packages`.
+- `daemon.Daemon` loses `peerID`, renames `cids` to `packages`, and drives
+  `discovery.KeepAlive` instead of the deleted `Client.RunHeartbeat`.
+- `cmd/demo/main.go.new` deleted — it was untracked, CID-addressed, and
+  imported a package path that does not exist. `cmd/demo/main.go` itself was
+  already name-version based; only two stale comments needed fixing.
+
+Three things in here are not mechanical:
+
+1. **`Reload` deadlocked.** It took `d.mu` and then called `startHTTPServer`,
+   which took `d.mu` again. `sync.Mutex` is not reentrant, so any SIGHUP that
+   changed `listen_addr` hung the daemon permanently. Pre-existing, not caused
+   by this migration, but it was in code this commit rewrites, so leaving it
+   would have meant knowingly shipping a deadlock. The internal helpers are now
+   `…Locked` and the exported entry points take the lock once.
+2. **A tracker that is down at startup is no longer fatal.** `KeepAlive` owns
+   the initial announce, so `Start()` cannot return its error. This is the
+   right behaviour — v0.2's whole self-healing story is that a daemon survives
+   the tracker going away — but it is a behaviour change, not a refactor.
+3. **`staticCache` is a placeholder.** It reports the list from `-packages` and
+   never changes, so the daemon does not notice `pkg install` or `pkg clean`.
+   The real source is `daemon.Watcher`, which is written and tested but not
+   wired in. Wiring it is the next piece of work, not part of the wire
+   migration.
+
 ## Areas of uncertainty
 
 1. **Name-version grammar.** Unspecified, as above. Left permissive on purpose.
@@ -209,7 +238,24 @@ Other changes:
    `proto.ValidateNameVersion`.** Not consolidated in this commit to keep it
    scoped to proto; `peer` should delegate to `proto` in a follow-up.
 3. **Intermediate commits do not build.** A wire-contract change cannot be
-   half-applied. `go build ./...` is red from this commit until the
-   `discovery` commit lands; each commit is individually reviewable and
-   `go test ./internal/proto/` passes at this one. The AGENTS.md gate is run
-   against the branch tip, not each commit.
+   half-applied, so `go build ./...` is red from commit 1 until commit 5. Each
+   commit is individually reviewable and its own package's tests pass at that
+   commit. The AGENTS.md gate is run against the branch tip, not each commit,
+   and is green there.
+4. **THE SERVING PORT / FACADE PORT PROBLEM — needs a decision.**
+   `config.DaemonConfig` has one `ListenAddr`, but three ports are wanted:
+   the daemon's own HTTP port, the peer-transfer port that gets announced as
+   `servingPort`, and a loopback-only port for the mirror facade (which pkg
+   dials, and which must not be reachable off-box). `daemon.servingPort`
+   currently derives the announced port from `ListenAddr` — faithful to what
+   the pre-v0.2 code did, but it conflates the first two and does nothing for
+   the third. This is why `Facade.ListenAndServe` is still not mounted. It is a
+   config-schema question (UC-01) and I have not invented an answer.
+5. **`PackageHashes` still has no implementation.** Unchanged by this work, but
+   it remains the facade's other hard blocker: with `Hashes == nil` every
+   package request 404s. It needs a reader for pkg's repository database, whose
+   location and format are not in `docs/`. Already on the prior agent's
+   uncertainty list in `claude-mirror-facade.md`.
+6. **`peer.Server.Serve` still hot-spins on a permanent `Accept` error.**
+   Untouched here. `facade_test.go` deliberately leaks a listener to work
+   around it.

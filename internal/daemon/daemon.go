@@ -3,24 +3,25 @@ package daemon
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/config"
 	"github.com/ndrew222/p2p-pkg-daemon/internal/discovery"
-	"github.com/ndrew222/p2p-pkg-daemon/internal/proto"
 )
 
 type Daemon struct {
 	mu         sync.Mutex
 	config     *config.DaemonConfig
 	configPath string
-	peerID     string
-	cids       []string
+	packages   []string
 	client     *discovery.Client
+	done       chan struct{} // closed to stop the keep-alive loop
 	httpServer *http.Server
 	running    bool
 }
@@ -30,63 +31,103 @@ var (
 	daemonMu     sync.Mutex
 )
 
-// Start initializes and runs the daemon with the given config
-func Start(cfg *config.DaemonConfig, peerID string, cids []string, configPath string) error {
+// staticCache reports a fixed package list to the keep-alive.
+//
+// PLACEHOLDER. The real source is the cache watcher (Watcher.Scan plus its
+// change channel), which is written but not yet wired into the daemon --
+// see the work log. Until it is, the daemon announces whatever list it was
+// started with and never notices a pkg install or pkg clean.
+type staticCache struct {
+	packages []string
+}
+
+func (s staticCache) Scan() ([]string, error) { return s.packages, nil }
+
+// Start initializes and runs the daemon with the given config.
+func Start(cfg *config.DaemonConfig, packages []string, configPath string) error {
 	d := &Daemon{
 		config:     cfg,
 		configPath: configPath,
-		peerID:     peerID,
-		cids:       cids,
+		packages:   packages,
 		running:    true,
 	}
 
-	// Set global
 	daemonMu.Lock()
 	globalDaemon = d
 	daemonMu.Unlock()
 
-	// Start HTTP server
-	if err := d.startHTTPServer(); err != nil {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.startHTTPServerLocked(); err != nil {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
 	}
-
-	// Start discovery client with heartbeat
-	if err := d.startDiscovery(); err != nil {
+	if err := d.startDiscoveryLocked(); err != nil {
 		return fmt.Errorf("failed to start discovery: %w", err)
 	}
 
-	// Setup SIGHUP for hot reload
 	d.setupReloadHandler()
-
 	return nil
 }
 
-func (d *Daemon) startDiscovery() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// servingPort extracts the port a peer would dial us on.
+//
+// PROVISIONAL. v0.2 has the daemon announce the port it listens on for peer
+// transfers, which is not necessarily the port it serves HTTP on -- and the
+// mirror facade needs a third, loopback-only port that config does not have
+// either. config.DaemonConfig carries a single ListenAddr, so this reuses it,
+// which is exactly what the pre-v0.2 code did when it announced ListenAddr as
+// its address. Splitting the ports is a config change and an open question for
+// the spec owner; see the work log.
+func servingPort(listenAddr string) (int, error) {
+	_, portStr, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return 0, fmt.Errorf("listen_addr is not host:port: %w", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, fmt.Errorf("listen_addr port %q is not a number: %w", portStr, err)
+	}
+	return port, nil
+}
 
-	client := discovery.New(d.config.TrackerURL, proto.PeerID(d.peerID), d.config.ListenAddr)
-	if err := client.Announce(d.cids); err != nil {
-		return fmt.Errorf("initial announce failed: %w", err)
+// startDiscoveryLocked starts the tracker conversation. CALLER MUST HOLD d.mu.
+func (d *Daemon) startDiscoveryLocked() error {
+	port, err := servingPort(d.config.ListenAddr)
+	if err != nil {
+		return err
 	}
 
-	d.client = client
+	d.client = discovery.New(d.config.TrackerURL)
+	d.done = make(chan struct{})
 
-	// Start heartbeat in background
-	getCIDs := func() []string { return d.cids }
-	go client.RunHeartbeat(getCIDs)
+	// KeepAlive owns the announce/ping loop, including the initial
+	// registration and the rule that we stay quiet while nothing is
+	// registered. A tracker that is down at startup is no longer fatal:
+	// the loop keeps trying, which is the self-healing behaviour v0.2
+	// describes. The old code failed Start() on the first announce error.
+	ka := discovery.NewKeepAlive(d.client, staticCache{packages: d.packages}, port, nil)
+	go ka.Run(d.done)
 
-	log.Printf("Discovery started: peer=%s, tracker=%s, addr=%s",
-		d.peerID, d.config.TrackerURL, d.config.ListenAddr)
+	log.Printf("Discovery started: tracker=%s, servingPort=%d, packages=%d",
+		d.config.TrackerURL, port, len(d.packages))
 	return nil
 }
 
-func (d *Daemon) startHTTPServer() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// stopDiscoveryLocked stops the keep-alive loop. CALLER MUST HOLD d.mu.
+// Safe to call when discovery was never started or is already stopped.
+func (d *Daemon) stopDiscoveryLocked() {
+	if d.done == nil {
+		return
+	}
+	close(d.done)
+	d.done = nil // so a second call does not close a closed channel
+}
 
+// startHTTPServerLocked (re)starts the daemon's HTTP listener.
+// CALLER MUST HOLD d.mu.
+func (d *Daemon) startHTTPServerLocked() error {
 	if d.httpServer != nil {
-		// Close old server if it exists
 		d.httpServer.Close()
 	}
 
@@ -95,7 +136,11 @@ func (d *Daemon) startHTTPServer() error {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	})
-	// TODO: UC-06 will add /download, /serve endpoints
+	// TODO: the mirror facade (Facade, UC-02/UC-07) and the peer seed
+	// server (peer.Server, UC-06) both still need mounting. Neither can go
+	// on this mux: the facade must be loopback-only on its own port, and
+	// peer.Server speaks the peerwire framing, not HTTP. Both are blocked
+	// on the config change noted in servingPort.
 
 	d.httpServer = &http.Server{
 		Addr:    d.config.ListenAddr,
@@ -128,44 +173,41 @@ func (d *Daemon) setupReloadHandler() {
 	}()
 }
 
-// Reload reloads the config from file and applies changes without restarting
+// Reload reloads the config from file and applies changes without restarting.
 func (d *Daemon) Reload() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Load new config
 	newCfg, err := config.Load(d.configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-
-	// Validate
 	if err := config.Validate(newCfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Check if address changed
+	// Take the lock only once, and call the Locked helpers from under it.
+	// The previous version locked here and then called startHTTPServer,
+	// which locked again -- sync.Mutex is not reentrant, so any SIGHUP
+	// that changed the listen address deadlocked the daemon.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	addrChanged := d.config.ListenAddr != newCfg.ListenAddr
 	trackerChanged := d.config.TrackerURL != newCfg.TrackerURL
 
-	// Update config
 	d.config = newCfg
 
-	// If address changed, restart HTTP server
 	if addrChanged {
-		if err := d.startHTTPServer(); err != nil {
+		if err := d.startHTTPServerLocked(); err != nil {
 			return fmt.Errorf("failed to restart HTTP server: %w", err)
 		}
 		log.Printf("HTTP server restarted on %s", d.config.ListenAddr)
 	}
 
-	// If tracker changed, restart discovery
+	// The serving port is derived from ListenAddr, so an address change
+	// means the tracker is advertising a stale port for us and discovery
+	// has to restart too.
 	if trackerChanged || addrChanged {
-		// Stop old client (needs Stop() method on discovery.Client)
-		if d.client != nil {
-			d.client.Stop()
-		}
-		if err := d.startDiscovery(); err != nil {
+		d.stopDiscoveryLocked()
+		if err := d.startDiscoveryLocked(); err != nil {
 			return fmt.Errorf("failed to restart discovery: %w", err)
 		}
 		log.Printf("Discovery re-announced to %s", d.config.TrackerURL)
@@ -174,7 +216,7 @@ func (d *Daemon) Reload() error {
 	return nil
 }
 
-// Stop gracefully shuts down the daemon
+// Stop gracefully shuts down the daemon.
 func (d *Daemon) Stop() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -184,10 +226,7 @@ func (d *Daemon) Stop() error {
 	if d.httpServer != nil {
 		d.httpServer.Close()
 	}
-
-	if d.client != nil {
-		d.client.Stop()
-	}
+	d.stopDiscoveryLocked()
 
 	return nil
 }

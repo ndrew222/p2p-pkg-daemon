@@ -11,8 +11,6 @@ import (
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/config" // UC-01
 	"github.com/ndrew222/p2p-pkg-daemon/internal/daemon" // UC-01
-	//"github.com/ndrew222/p2p-pkg-daemon/internal/discovery" // F3 client
-	//"github.com/ndrew222/p2p-pkg-daemon/internal/proto"     // needed only for proto.PeerID type conversation
 )
 
 // TEMPORARY STUB: exists only to exercise internal/discovery end-to-end
@@ -25,8 +23,7 @@ func main() {
 		tracker    = flag.String("tracker", "", "Tracker URL (overrides config)")
 		addr       = flag.String("addr", "", "Listen address (overrides config)")
 		buffer     = flag.String("buffer", "", "Buffer directory (overrides config)")
-		peerID     = flag.String("id", "", "Peer ID (required, not persisted)")
-		cidList    = flag.String("cids", "", "Comma-separated CIDs we hold (required, not persisted)")
+		pkgList    = flag.String("packages", "", "Comma-separated name-versions we hold (required, not persisted)")
 		configPath = flag.String("config", "", "Path to config file (default: $HOME/.config/jmj/config.json)")
 		genConfig  = flag.Bool("generate-config", false, "Generate config JSON to stdout and exit")
 	// reads os.Args and fill those slots in
@@ -69,14 +66,17 @@ func main() {
 	}
 
 	// ---- DAEMON MODE ----
-	// Required flags: -id and -cids (these are not persisted)
-	// flag check
-	// os.Exit(1) for daemon with no identity as it cant ping and cant be found
-	// fail here early
-	if *peerID == "" || *cidList == "" {
-		log.Fatal("jmj: -id and -cids  are required")
+	// -packages is required and not persisted. There is no -id any more:
+	// under tracker protocol v0.2 the daemon has no identity to send, the
+	// tracker keys its entry by the connection's source IP.
+	//
+	// A daemon with nothing to serve has nothing to announce, and the
+	// tracker treats an empty list as deregistration, so fail early rather
+	// than register and immediately withdraw.
+	if *pkgList == "" {
+		log.Fatal("jmj: -packages is required")
 	}
-	cids := strings.Split(*cidList, ",")
+	packages := strings.Split(*pkgList, ",")
 
 	// 1. Load config (missing → defaults, corrupt → .bak + defaults)
 	cfg, err := config.Load(*configPath)
@@ -100,14 +100,14 @@ func main() {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
 
-	// Start daemon (this handles everything: client, heartbeat, HTTP server, SIGHUP)
-	if err := daemon.Start(cfg, *peerID, cids, *configPath); err != nil {
+	// Start daemon (this handles everything: client, keep-alive, HTTP server, SIGHUP)
+	if err := daemon.Start(cfg, packages, *configPath); err != nil {
 		log.Fatalf("Failed to start daemon: %v", err)
 	}
 
 	// ---- BLOCK FOREVER (keep daemon running) ----
-	// daemon.Start already launched the heartbeat goroutine (discovery.RunHeartbeat),
-	// so main just parks here.
+	// daemon.Start already launched the keep-alive goroutine
+	// (discovery.KeepAlive.Run), so main just parks here.
 	log.Println("jmj daemon is running. Press Ctrl+C to stop.")
 	select {} // blocks indefinitely
 }
