@@ -34,6 +34,17 @@ import (
 // mirror; the facade matches on the tail and ignores the prefix.
 const packageDir = "All"
 
+// hashedDir is the optional subdirectory pkg puts between All/ and the file.
+// Measured against pkg 2.7.5: "pkg fetch indexinfo" requests
+//
+//	/…/All/Hashed/indexinfo-0.3.1_1~ae9dce33aa.pkg
+//
+// while the repository database's own path column agrees. The earlier rule
+// required All to be the second-to-last segment, so every real fetch was
+// classified as metadata and answered 404 -- the daemon was a no-op against a
+// live repository.
+const hashedDir = "Hashed"
+
 // PackageHashes is the facade's read-only view of pkg's repository database:
 // the expected hash for a name-version. Integrity comes solely from here --
 // the tracker never verifies and peers are not trusted.
@@ -224,17 +235,43 @@ func packageRequest(urlPath string) (nameVersion string, ok bool) {
 	// attempt cannot smuggle "All" into position.
 	cleaned := path.Clean("/" + strings.TrimPrefix(urlPath, "/"))
 
-	dir, file := path.Split(cleaned)
-	if path.Base(strings.TrimSuffix(dir, "/")) != packageDir {
+	segments := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
+
+	// Find All anywhere in the path rather than at a fixed depth: the repo
+	// path before it varies per mirror, per ABI and per branch, and pkg
+	// puts a Hashed/ level after it. The LAST All wins, so a repository
+	// that happens to be named "All" earlier in the path cannot displace
+	// the real one.
+	allAt := -1
+	for i, seg := range segments {
+		if seg == packageDir {
+			allAt = i
+		}
+	}
+	if allAt == -1 {
 		return "", false
 	}
+
+	// What follows All/ is either the file, or Hashed/ and then the file.
+	// Anything else -- a deeper tree, or All/ itself -- is not a package
+	// request.
+	rest := segments[allAt+1:]
+	if len(rest) == 2 && rest[0] == hashedDir {
+		rest = rest[1:]
+	}
+	if len(rest) != 1 {
+		return "", false
+	}
+
+	file := rest[0]
 	if !strings.HasSuffix(file, packageFileExtension) {
-		// e.g. All/ itself, or a stray non-package file under All/.
+		// e.g. a stray non-package file under All/.
 		return "", false
 	}
 
 	// Same name-version rule the cache watcher applies to cache filenames:
-	// a final hyphen splitting a non-empty name from a digit-initial version.
+	// a final hyphen splitting a non-empty name from a digit-initial
+	// version, after the ~hash10 suffix is stripped.
 	name, version := parsePackageName(file)
 	if name == "" || version == "" {
 		return "", true
