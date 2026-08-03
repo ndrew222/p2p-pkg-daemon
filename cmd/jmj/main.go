@@ -3,8 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/daemon"
@@ -23,13 +25,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO: pass a real RepositoryDatabase implementation here once we have
-	// read access to pkg's repo DB wired up. Passing nil for now means
-	// SanityFilter only checks that file names look valid; it can't yet
-	// check file sizes against the repo DB.
-	cw := daemon.New(*cacheDir, nil,
-		func(pkgs []daemon.PackageInfo) {
-			fmt.Printf("[update] %d packages\n", len(pkgs))
+	// UC-05 requires the listening port to travel alongside every
+	// announce, because the tracker can see our IP from the connection
+	// itself but has no way to guess which port we're listening on. -addr
+	// is "host:port"; pull just the port number out of it here.
+	_, portString, err := net.SplitHostPort(*addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid -addr %q, expected host:port: %v\n", *addr, err)
+		os.Exit(1)
+	}
+	listeningPort, err := strconv.Atoi(portString)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid port in -addr %q: %v\n", *addr, err)
+		os.Exit(1)
+	}
+
+	cw := daemon.New(*cacheDir, listeningPort, nil,
+		func(port int, pkgs []daemon.PackageInfo) {
+			fmt.Printf("[update] port=%d %d packages\n", port, len(pkgs))
 			for _, p := range pkgs {
 				fmt.Printf("  %s  (%d bytes)\n", p.NameVersion(), p.FileSizeBytes)
 			}

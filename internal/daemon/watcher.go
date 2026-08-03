@@ -11,35 +11,21 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// packageFileExtension is the file extension pkgng uses for package
-// archives in the local cache (/var/cache/pkg). FreeBSD's pkgng uses
-// ".pkg" for its packages (older setups sometimes use ".txz" instead).
-//
-// TODO: confirm this against a real pkg cache directory / with Andrew.
-// If your cache directory actually uses ".txz"
 const packageFileExtension = ".pkg"
 
-// PackageInfo represents a discovered package in the cache directory.
+// PackageInfo describes a package file found in the pkg cache.
 type PackageInfo struct {
-	// Name is the package name, e.g. "nginx" 
+	// Name is the package name, e.g. "nginx"
 	Name string `json:"name"`
 
-	// Version is the version string, e.g. "1.24.0"
 	Version string `json:"version"`
 
-	// Path is the full path to the file on disk, inside the pkg cache directory
 	Path string `json:"path"`
 
-	// FileSizeBytes is the size of the file on disk, in bytes. This is
-	// what SanityFilter compares against the repository database's
-	// expected size 
 	FileSizeBytes int64 `json:"file_size_bytes"`
 }
 
-// NameVersion returns the package identifier in "name-version" form (e.g.
-// "nginx-1.24.0"), which is the exact string format the tracker and pkg
-// itself use to refer to packages. If Version is empty (the file name had
-// no recognizable version), this just returns Name
+// NameVersion returns the package identifier as "name-version".
 func (p PackageInfo) NameVersion() string {
 	if p.Version == "" {
 		return p.Name
@@ -47,17 +33,15 @@ func (p PackageInfo) NameVersion() string {
 	return p.Name + "-" + p.Version
 }
 
-// RepositoryDatabase is the thing that knows the "expected" facts about a
-// package, as recorded in pkg's signed repository database. SanityFilter
-// uses it clarify the expected size of a package file on disk
+// RepositoryDatabase looks up expected package sizes from pkg's repo DB
 type RepositoryDatabase interface {
-	// ExpectedFileSizeBytes looks up the expected size, in bytes
 	ExpectedFileSizeBytes(nameVersion string) (expectedSizeBytes int64, found bool)
 }
 
 // ChangeType describes what happened to a package
 type ChangeType int
 
+// Added, Removed, and Modified are the possible ChangeType values.
 const (
 	Added ChangeType = iota
 	Removed
@@ -85,38 +69,32 @@ type ChangeEvent struct {
 
 // Watcher monitors the cache directory for package changes
 type Watcher struct {
-	cacheDir string
-	repoDB   RepositoryDatabase
-	onUpdate func([]PackageInfo)
-	onChange func(ChangeEvent)
-	watcher  *fsnotify.Watcher
-	mu       sync.RWMutex
-	pkgs     map[string]PackageInfo
-	done     chan struct{}
-	stopOnce sync.Once
+	cacheDir      string
+	listeningPort int
+	repoDB        RepositoryDatabase
+	onUpdate      func(listeningPort int, pkgs []PackageInfo)
+	onChange      func(ChangeEvent)
+	watcher       *fsnotify.Watcher
+	mu            sync.RWMutex
+	pkgs          map[string]PackageInfo
+	done          chan struct{}
+	stopOnce      sync.Once
 }
 
-// New creates a new cache watcher. It returns *Watcher, not an error. The
-// caller should call Start() after construction.
-//
-// repoDB is used to sanity-check every discovered package's file size
-// against what the repository database expects (see SanityFilter). Pass a
-// real implementation backed by pkg's repo DB in production; tests can pass
-// a small in-memory fake instead.
-//
-// onChange is optional; pass nil if you don't need per-event notifications.
-func New(cacheDir string, repoDB RepositoryDatabase, onUpdate func([]PackageInfo), onChange func(ChangeEvent)) *Watcher {
+// New creates a Watcher for the given cache directory.
+func New(cacheDir string, listeningPort int, repoDB RepositoryDatabase, onUpdate func(listeningPort int, pkgs []PackageInfo), onChange func(ChangeEvent)) *Watcher {
 	return &Watcher{
-		cacheDir: cacheDir,
-		repoDB:   repoDB,
-		onUpdate: onUpdate,
-		onChange: onChange,
-		pkgs:     make(map[string]PackageInfo),
-		done:     make(chan struct{}),
+		cacheDir:      cacheDir,
+		listeningPort: listeningPort,
+		repoDB:        repoDB,
+		onUpdate:      onUpdate,
+		onChange:      onChange,
+		pkgs:          make(map[string]PackageInfo),
+		done:          make(chan struct{}),
 	}
 }
 
-// Start begins watching the cache directory. Returns an error if fsnotify fails.
+// Start begins watching the cache directory for changes.
 func (w *Watcher) Start() error {
 	if err := os.MkdirAll(w.cacheDir, 0755); err != nil {
 		return fmt.Errorf("mkdir cache dir: %w", err)
@@ -145,7 +123,7 @@ func (w *Watcher) Start() error {
 	return nil
 }
 
-// Stop shuts down the watcher
+// Stop shuts down the watcher. Safe to call more than once.
 func (w *Watcher) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.done)
@@ -154,8 +132,6 @@ func (w *Watcher) Stop() {
 		}
 	})
 }
-
-// parsePackageName extracts the name and version from a file name.
 
 func parsePackageName(filename string) (name, version string) {
 	base := strings.TrimSuffix(filename, packageFileExtension)
@@ -187,6 +163,8 @@ func isValidNameVersionFormat(pkg PackageInfo) bool {
 	return pkg.Name != "" && pkg.Version != ""
 }
 
+// SanityFilter keeps only packages with a valid name-version filename
+// and a file size matching the repository database.
 func SanityFilter(candidates []PackageInfo, repoDB RepositoryDatabase) []PackageInfo {
 	accepted := make([]PackageInfo, 0, len(candidates))
 
@@ -198,8 +176,6 @@ func SanityFilter(candidates []PackageInfo, repoDB RepositoryDatabase) []Package
 		if repoDB != nil {
 			expectedSizeBytes, foundInRepoDB := repoDB.ExpectedFileSizeBytes(candidate.NameVersion())
 			if !foundInRepoDB {
-				// The repository database has never heard of this
-				// package. Skip it.
 				continue
 			}
 			if candidate.FileSizeBytes != expectedSizeBytes {
@@ -213,8 +189,8 @@ func SanityFilter(candidates []PackageInfo, repoDB RepositoryDatabase) []Package
 	return accepted
 }
 
-// Scan forces a full rescan of the cache directory, applies the sanity
-// filter, and emits an update with the resulting package list.
+// Scan rescans the cache directory and reports the full, filtered
+// package list via onUpdate.
 func (w *Watcher) Scan() ([]PackageInfo, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -246,7 +222,7 @@ func (w *Watcher) Scan() ([]PackageInfo, error) {
 
 	out := SanityFilter(rawCandidates, w.repoDB)
 	if w.onUpdate != nil {
-		w.onUpdate(out)
+		w.onUpdate(w.listeningPort, out)
 	}
 	return out, nil
 }
