@@ -7,7 +7,6 @@ import (
 	"log" // output
 	"os"
 	"path/filepath"
-	"strings" // strings.Split to turn "aaa, bbb, ccc" into ["aaa", "bbb", "ccc"]
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/config" // UC-01
 	"github.com/ndrew222/p2p-pkg-daemon/internal/daemon" // UC-01
@@ -23,7 +22,7 @@ func main() {
 		tracker    = flag.String("tracker", "", "Tracker URL (overrides config)")
 		addr       = flag.String("addr", "", "Listen address (overrides config)")
 		buffer     = flag.String("buffer", "", "Buffer directory (overrides config)")
-		pkgList    = flag.String("packages", "", "Comma-separated name-versions we hold (required, not persisted)")
+		cache      = flag.String("cache", "", "pkg cache directory, read-only (overrides config)")
 		configPath = flag.String("config", "", "Path to config file (default: $HOME/.config/jmj/config.json)")
 		genConfig  = flag.Bool("generate-config", false, "Generate config JSON to stdout and exit")
 	// reads os.Args and fill those slots in
@@ -52,7 +51,13 @@ func main() {
 		if *buffer != "" {
 			cfg.BufferDir = *buffer
 		}
-		if err := config.Validate(cfg); err != nil {
+		if *cache != "" {
+			cfg.CacheDir = *cache
+		}
+		// Fields only: the generator writes a config for whatever host
+		// will run it, so it must not demand that this host already has
+		// the pkg cache or be willing to create the buffer directory.
+		if err := config.ValidateFields(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
 			os.Exit(1)
 		}
@@ -66,17 +71,13 @@ func main() {
 	}
 
 	// ---- DAEMON MODE ----
-	// -packages is required and not persisted. There is no -id any more:
-	// under tracker protocol v0.2 the daemon has no identity to send, the
-	// tracker keys its entry by the connection's source IP.
+	// No required flags any more. There is no -id (v0.2 gives the daemon no
+	// identity to send; the tracker keys on the connection's source IP) and
+	// no -packages (the cache watcher discovers the list from cache_dir, so
+	// a hand-written one would just go stale on the first pkg install).
 	//
-	// A daemon with nothing to serve has nothing to announce, and the
-	// tracker treats an empty list as deregistration, so fail early rather
-	// than register and immediately withdraw.
-	if *pkgList == "" {
-		log.Fatal("jmj: -packages is required")
-	}
-	packages := strings.Split(*pkgList, ",")
+	// An empty cache is a legitimate state: the keep-alive stays quiet until
+	// there is something to announce.
 
 	// 1. Load config (missing → defaults, corrupt → .bak + defaults)
 	cfg, err := config.Load(*configPath)
@@ -94,14 +95,18 @@ func main() {
 	if *buffer != "" {
 		cfg.BufferDir = *buffer
 	}
+	if *cache != "" {
+		cfg.CacheDir = *cache
+	}
 
 	// 3. Validate merged config
 	if err := config.Validate(cfg); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
 
-	// Start daemon (this handles everything: client, keep-alive, HTTP server, SIGHUP)
-	if err := daemon.Start(cfg, packages, *configPath); err != nil {
+	// Start daemon (this handles everything: cache watcher, client,
+	// keep-alive, HTTP server, SIGHUP)
+	if err := daemon.Start(cfg, *configPath); err != nil {
 		log.Fatalf("Failed to start daemon: %v", err)
 	}
 

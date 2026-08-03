@@ -19,8 +19,8 @@ type Daemon struct {
 	mu         sync.Mutex
 	config     *config.DaemonConfig
 	configPath string
-	packages   []string
 	client     *discovery.Client
+	watcher    *Watcher
 	done       chan struct{} // closed to stop the keep-alive loop
 	httpServer *http.Server
 	running    bool
@@ -31,24 +31,31 @@ var (
 	daemonMu     sync.Mutex
 )
 
-// staticCache reports a fixed package list to the keep-alive.
-//
-// PLACEHOLDER. The real source is the cache watcher (Watcher.Scan plus its
-// change channel), which is written but not yet wired into the daemon --
-// see the work log. Until it is, the daemon announces whatever list it was
-// started with and never notices a pkg install or pkg clean.
-type staticCache struct {
-	packages []string
+// cacheSource adapts the cache watcher to discovery.Cache. The keep-alive
+// wants the name-version strings that go on the wire; the watcher deals in
+// PackageInfo. SanityFilter has already dropped anything without both a name
+// and a version, so every entry here has a real name-version.
+type cacheSource struct {
+	watcher *Watcher
 }
 
-func (s staticCache) Scan() ([]string, error) { return s.packages, nil }
+func (c cacheSource) Scan() ([]string, error) {
+	pkgs, err := c.watcher.Scan()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(pkgs))
+	for _, p := range pkgs {
+		out = append(out, p.NameVersion())
+	}
+	return out, nil
+}
 
 // Start initializes and runs the daemon with the given config.
-func Start(cfg *config.DaemonConfig, packages []string, configPath string) error {
+func Start(cfg *config.DaemonConfig, configPath string) error {
 	d := &Daemon{
 		config:     cfg,
 		configPath: configPath,
-		packages:   packages,
 		running:    true,
 	}
 
@@ -91,11 +98,36 @@ func servingPort(listenAddr string) (int, error) {
 	return port, nil
 }
 
-// startDiscoveryLocked starts the tracker conversation. CALLER MUST HOLD d.mu.
+// startDiscoveryLocked starts the cache watcher and the tracker conversation.
+// CALLER MUST HOLD d.mu.
 func (d *Daemon) startDiscoveryLocked() error {
 	port, err := servingPort(d.config.ListenAddr)
 	if err != nil {
 		return err
+	}
+
+	// changed is the watcher's nudge to the keep-alive. Buffered with room
+	// for one, and the send below is non-blocking, which does two things:
+	// the watcher's event loop can never block on a keep-alive that is
+	// mid-announce, and a burst of events (installing one package pulls in
+	// dozens of dependencies, each firing an fsnotify event) collapses into
+	// a single pending re-announce instead of dozens.
+	changed := make(chan struct{}, 1)
+	onChange := func(ChangeEvent) {
+		select {
+		case changed <- struct{}{}:
+		default: // a re-announce is already pending; it will pick this up too
+		}
+	}
+
+	// repoDB is nil: no RepositoryDatabase implementation exists yet, so
+	// SanityFilter degrades to filename-format checks and skips the size
+	// comparison. Safe but weaker -- a truncated package can be announced,
+	// costing one wasted transfer, which the end-to-end hash check on the
+	// downloader's side catches. See the work log.
+	d.watcher = New(d.config.CacheDir, nil, nil, onChange)
+	if err := d.watcher.Start(); err != nil {
+		return fmt.Errorf("cache watcher: %w", err)
 	}
 
 	d.client = discovery.New(d.config.TrackerURL)
@@ -103,25 +135,28 @@ func (d *Daemon) startDiscoveryLocked() error {
 
 	// KeepAlive owns the announce/ping loop, including the initial
 	// registration and the rule that we stay quiet while nothing is
-	// registered. A tracker that is down at startup is no longer fatal:
-	// the loop keeps trying, which is the self-healing behaviour v0.2
-	// describes. The old code failed Start() on the first announce error.
-	ka := discovery.NewKeepAlive(d.client, staticCache{packages: d.packages}, port, nil)
+	// registered. A tracker that is down at startup is not fatal: the loop
+	// keeps trying, which is the self-healing behaviour v0.2 describes.
+	ka := discovery.NewKeepAlive(d.client, cacheSource{watcher: d.watcher}, port, changed)
 	go ka.Run(d.done)
 
-	log.Printf("Discovery started: tracker=%s, servingPort=%d, packages=%d",
-		d.config.TrackerURL, port, len(d.packages))
+	log.Printf("Discovery started: tracker=%s, servingPort=%d, cache=%s",
+		d.config.TrackerURL, port, d.config.CacheDir)
 	return nil
 }
 
-// stopDiscoveryLocked stops the keep-alive loop. CALLER MUST HOLD d.mu.
-// Safe to call when discovery was never started or is already stopped.
+// stopDiscoveryLocked stops the keep-alive loop and the cache watcher.
+// CALLER MUST HOLD d.mu. Safe to call when discovery was never started or is
+// already stopped.
 func (d *Daemon) stopDiscoveryLocked() {
-	if d.done == nil {
-		return
+	if d.done != nil {
+		close(d.done)
+		d.done = nil // so a second call does not close a closed channel
 	}
-	close(d.done)
-	d.done = nil // so a second call does not close a closed channel
+	if d.watcher != nil {
+		d.watcher.Stop()
+		d.watcher = nil
+	}
 }
 
 // startHTTPServerLocked (re)starts the daemon's HTTP listener.
@@ -192,6 +227,7 @@ func (d *Daemon) Reload() error {
 
 	addrChanged := d.config.ListenAddr != newCfg.ListenAddr
 	trackerChanged := d.config.TrackerURL != newCfg.TrackerURL
+	cacheChanged := d.config.CacheDir != newCfg.CacheDir
 
 	d.config = newCfg
 
@@ -204,8 +240,9 @@ func (d *Daemon) Reload() error {
 
 	// The serving port is derived from ListenAddr, so an address change
 	// means the tracker is advertising a stale port for us and discovery
-	// has to restart too.
-	if trackerChanged || addrChanged {
+	// has to restart too. A cache change means the watcher is watching the
+	// wrong directory.
+	if trackerChanged || addrChanged || cacheChanged {
 		d.stopDiscoveryLocked()
 		if err := d.startDiscoveryLocked(); err != nil {
 			return fmt.Errorf("failed to restart discovery: %w", err)

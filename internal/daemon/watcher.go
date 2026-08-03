@@ -118,8 +118,18 @@ func New(cacheDir string, repoDB RepositoryDatabase, onUpdate func([]PackageInfo
 
 // Start begins watching the cache directory. Returns an error if fsnotify fails.
 func (w *Watcher) Start() error {
-	if err := os.MkdirAll(w.cacheDir, 0755); err != nil {
-		return fmt.Errorf("mkdir cache dir: %w", err)
+	// The pkg cache is READ-ONLY to this daemon, so a missing directory is
+	// an error to report, not a directory to create. This used to be
+	// os.MkdirAll, which would have had the daemon writing into
+	// /var/cache/pkg -- exactly what the hard constraints forbid -- and
+	// would have silently turned a misconfigured path into an empty cache
+	// that watches forever and announces nothing.
+	info, err := os.Stat(w.cacheDir)
+	if err != nil {
+		return fmt.Errorf("cache dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("cache dir %q is not a directory", w.cacheDir)
 	}
 
 	fw, err := fsnotify.NewWatcher()
