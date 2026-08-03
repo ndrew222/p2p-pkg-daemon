@@ -5,20 +5,20 @@ participant "P2P Daemon" as Daemon
 participant "pkg cache\n(/var/cache/pkg)" as Cache
 participant Tracker
 
-note over Daemon : Two message types reach the tracker:\n- ping()  — bare keep-alive. Triggered by daemon startup (UC-01)\n  and a periodic timer (< timeout; values -> ADR). Suppressed while\n  the daemon has nothing registered (empty cache) — see below.\n- announce(list) — carries a package list. Triggered by the cache\n  watcher when a new package appears in the pkg cache (whether\n  fetched via P2P or an ordinary mirror).
+note over Daemon : Two message types reach the tracker:\n- ping()  — bare keep-alive. Triggered by a periodic timer\n  (PING_INTERVAL 20s < TIMEOUT 60s). Suppressed while the daemon\n  has nothing registered (empty cache) — see below.\n- announce(list) — carries a package list. Triggered by daemon\n  startup (UC-01) and by the cache watcher when a package appears\n  in the pkg cache (whether fetched via P2P or an ordinary mirror).\n\nStartup announces rather than pings: a freshly started daemon is\nunknown to the tracker by definition, so its first ping would be a\nguaranteed 404 followed by the announce anyway. Announcing directly\nis the same exchange minus a wasted round trip, and the spec accepts\nan announce from any IP, solicited or not.
 
-alt [message = ping()  (startup / keep-alive)]
+alt message = ping()  (periodic keep-alive)
 
     Daemon -> Tracker : ping()
     activate Tracker
 
-    alt [tracker knows this IP]
+    alt tracker knows this IP
         Tracker -> Tracker : resetTimeout(IP)
         Tracker --> Daemon : acknowledgement
         note right of Tracker : When the timeout expires without\na ping, the IP and its package\nlist are flushed from memory
         deactivate Tracker
 
-    else [tracker does not know this IP]
+    else tracker does not know this IP
         Tracker --> Daemon : requestPackageList()
         deactivate Tracker
 
@@ -33,22 +33,22 @@ alt [message = ping()  (startup / keep-alive)]
         Daemon -> Tracker : announce(listeningPort, packageList)
         note right : IP comes from the connection's source\naddress; the serving port cannot be\ninferred and must be in the message\n(ADR-001 spec detail)
         activate Tracker
-        alt [list non-empty]
+        alt list non-empty
             Tracker -> Tracker : register(IP:port, packageList), startTimeout(IP)
             Tracker --> Daemon : acknowledgement of updated list
-        else [list empty]
+        else list empty
             Tracker --> Daemon : acknowledgement (nothing retained)
             note right of Tracker : Empty list acked (daemon learns tracker\nis reachable) but NOT stored; IP stays\nunknown. Daemon then suppresses keep-alive\npings until a package appears, else every\nping re-loops this branch (B18).
-        else [network error mid-stream]
+        else network error mid-stream
             Daemon -> Daemon : logError() ; scheduleRetry()
             note right : Tracker never registered the IP,\nso it treats it as unknown on retry.\nSelf-healing.
         end
         deactivate Tracker
     end
 
-else [message = announce(list)  (cache watcher, unsolicited)]
+else message = announce(list)  (startup, or cache watcher — unsolicited)
 
-    note over Daemon : A new package appeared in the cache.\nThe daemon announces directly — it does NOT wait\nto be asked. Works whether or not the tracker\ncurrently knows this IP. This is the path a known\ndaemon uses to push an updated list — the case the\nold diagram could not express (B13/A14).
+    note over Daemon : Daemon startup, or a package appeared in the cache.\nThe daemon announces directly — it does NOT wait\nto be asked. Works whether or not the tracker\ncurrently knows this IP. This is the path a known\ndaemon uses to push an updated list — the case the\nold diagram could not express (B13/A14).
 
     Daemon -> Cache : scanCache() (read-only)
     activate Cache
@@ -60,14 +60,14 @@ else [message = announce(list)  (cache watcher, unsolicited)]
     activate Tracker
     note right of Tracker : An announce from a KNOWN IP replaces\nits entry AND resets the timeout.
 
-    alt [list non-empty]
+    alt list non-empty
         Tracker -> Tracker : register(IP:port, packageList), startTimeout(IP)
         Tracker --> Daemon : acknowledgement of updated list
-    else [list empty  (e.g. after pkg clean)]
+    else list empty  (e.g. after pkg clean)
         Tracker -> Tracker : drop(IP)
         Tracker --> Daemon : acknowledgement (deregistered)
         note right of Tracker : Empty re-announce cleanly deregisters\nthe daemon until a package reappears.
-    else [network error mid-stream]
+    else network error mid-stream
         Daemon -> Daemon : logError() ; scheduleRetry()
     end
     deactivate Tracker

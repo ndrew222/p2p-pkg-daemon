@@ -17,14 +17,14 @@ note right : Network input from an UNTRUSTED\nremote daemon — not user input,\
 Daemon -> Cache: retrieve(packageName-version)
 activate Cache
  
-alt [package exists locally]
+alt package exists locally
 Cache --> Daemon: packageBytes
 deactivate Cache
 Daemon --> RemotePeer: streamPackageBytes()
 note over Daemon, RemotePeer: Requester verifies the hash\non its own end (UC-02).
 RemotePeer --> Daemon : transfer complete
  
-else [package not found]
+else package not found
 Cache --> Daemon: notFound
 deactivate Cache
 Daemon --> RemotePeer: error("404: package not held")

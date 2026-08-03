@@ -14,7 +14,7 @@
 |  | 2 | Invalid environment at startup (buffer directory not writable, pkg cache directory missing) |  |
 |  | 3 | Corrupted configuration file — recoverable, handled inline, not an abort |  |
 | **Operational Flow** | **Step** | **Action** |  |
-|  | 1 | User calls `jmj -generate-config` with flags dictating the desired settings |  |
+|  | 1 | User calls `jmj -generate-config` with flags dictating the desired settings. Flags fully determine the output: what is not supplied takes its default, and the existing config is **not** read as a merge base (see Assumptions) |  |
 |  | 2 | jmj validates the values alone — port range, address format, tracker URL, paths non-empty. No filesystem access, so a config can be generated on one machine for another |  |
 |  | 3 | jmj prints the complete config as JSON to stdout and exits. **It reads no config file, creates nothing, and writes nothing.** The generator has no side effects and needs no write permission anywhere |  |
 |  | 4 | The user redirects the output to a path they can write: `jmj -generate-config > ~/.config/jmj/config.json`, or `jmj -generate-config \| sudo tee /usr/local/etc/jmj.json`. Privilege handling, if any is needed at all, belongs to the shell and never to jmj |  |
@@ -32,7 +32,7 @@
 |  | **Error State:** Corrupted configuration file |  |  |
 |  | 6c | Reading the config returns a parse error |  |
 |  | 7c | Daemon comes up on defaults and makes a best-effort attempt to move the file aside to config.bak for inspection. The move is not required to succeed: with no write permission on the config directory the daemon logs it and carries on, because jmj never requires write access to its config path — main flow resumes at step 7 |  |
-| **Assumptions/ Comments** | The tracker address must be configured before any peer interaction is possible. Defaults are valid by construction, so only user-supplied values need validation. **jmj requires no write privileges to be configured:** the generator emits to stdout and the shell performs the write, which is why there is no permission-error path in the generator and no config writer in the codebase. At runtime the daemon writes only to its own temporary buffer directory; everything else it touches (config path, pkg cache, repository database) is read-only, the config path aside from the best-effort .bak move above. |  |  |
+| **Assumptions/ Comments** | The tracker address must be configured before any peer interaction is possible. Defaults are valid by construction, so only user-supplied values need validation. **jmj requires no write privileges to be configured:** the generator emits to stdout and the shell performs the write, which is why there is no permission-error path in the generator and no config writer in the codebase. At runtime the daemon writes only to its own temporary buffer directory; everything else it touches (config path, pkg cache, repository database) is read-only, the config path aside from the best-effort .bak move above. **Configuration is not a partial update.** An earlier revision of this use case specified merging the requested flags over the existing config. That cannot work for the primary idiom: `jmj -generate-config > config.json` has the shell truncate `config.json` to zero bytes *before* jmj is executed, so the settings to be merged are already gone by the time jmj could read them. Detecting the case and refusing to print is worse — the file has been truncated either way, and defaults would at least have been a valid config. Flags therefore fully determine the output, which makes redirecting onto an existing config well defined and idempotent. To change one setting on an existing config, edit the file, or re-run the generator with all the flags you want. |  |  |
  
 ---
  
@@ -91,13 +91,13 @@
 | **Description** | The daemon advertises the packages in pkg's cache to the tracker and keeps itself registered through periodic pings. The tracker holds one entry per IP (serving port, package list, timeout); an entry whose timeout expires without a ping is flushed. |  |  |
 | **Actors** | Primary | P2P Daemon |  |
 |  | Secondary | Tracker, pkg cache (/var/cache/pkg, read-only) |  |
-| **Trigger** | Daemon startup (UC-01). Periodic keep-alive timer. Cache watcher sees a new package appear in the pkg cache (whether fetched via P2P or an ordinary mirror). |  |  |
+| **Trigger** | Daemon startup (UC-01), which announces directly. Periodic keep-alive timer, which pings. Cache watcher sees a package appear in or leave the pkg cache (whether fetched via P2P or an ordinary mirror), which announces the new full list. |  |  |
 | **Precondition** | Daemon is running. Tracker address is configured. Network connectivity is available. The cache may be empty. |  |  |
 | **Postcondition** | Tracker holds an up-to-date (IP → serving port, package list) entry for this daemon with a running timeout — or, if the announced list was empty, holds nothing for this daemon. |  |  |
 | **Error States** | 1 | Network error mid-announce |  |
 |  | 2 | Timeout expiry (tracker side) |  |
 | **Operational Flow** | **Step** | **Action** |  |
-|  | 1 | Daemon pings the tracker |  |
+|  | 1 | Daemon pings the tracker. **At startup the daemon skips straight to step 4 and announces:** a freshly started daemon is unknown to the tracker by definition, so its first ping is a guaranteed 404 followed by the announce anyway. Announcing directly is the same exchange minus a wasted round trip, and an announce is accepted from any IP, solicited or not |  |
 |  | 2 | If the tracker knows this IP, it resets the timeout and acknowledges; done — no list is transferred |  |
 |  | 3 | If the tracker does not know this IP, it replies requestPackageList() |  |
 |  | 4 | Daemon scans the pkg cache (read-only) |  |
@@ -105,7 +105,7 @@
 |  | 6 | Daemon sends announce(listeningPort, packageList). The serving port must be in the message: the tracker takes the IP from the connection's source address but cannot infer the listening port. The list always replaces the previous one in full — never a delta |  |
 |  | 7 | Non-empty list: tracker registers (IP → port, list), starts the timeout, and acknowledges. Empty list: tracker acknowledges but stores nothing; the IP stays unregistered until a non-empty list arrives |  |
 |  | 8 | While nothing is registered (empty cache), the daemon suppresses keep-alive pings; there is nothing to keep alive |  |
-|  | 9 | When the cache watcher sees a new package, the daemon announces directly without waiting to be asked; an announce from a known IP replaces its entry and resets the timeout. This is how an already-registered daemon publishes an updated list |  |
+|  | 9 | When the cache watcher sees the cache change — a package appearing, being removed, or being rewritten — the daemon announces directly without waiting to be asked; an announce from a known IP replaces its entry and resets the timeout. This is how an already-registered daemon publishes an updated list. Installing one package pulls in dozens of dependencies, so the watcher's nudge to the announce loop coalesces: a re-announce already pending absorbs further changes rather than queueing one announce per file |  |
 | **Alternative Flow** | **Error State:** Network error mid-announce |  |  |
 |  | **Step** | **Action** |  |
 |  | 6a | Connection drops while the announce is in flight |  |
@@ -115,7 +115,7 @@
 |  | 1b | The tracker's timeout for an IP expires without a ping arriving |  |
 |  | 2b | Tracker flushes the IP and its package list from memory |  |
 |  | 3b | The daemon's next contact is handled as an unknown IP (re-registration) |  |
-| **Assumptions/ Comments** | Announce-time hashing is deliberately omitted: it would cost a full read of the cache for no security benefit, since integrity is verified end-to-end by the downloader. A stale or bit-rotted file costs one wasted transfer and a blacklist entry on the requester's side. Running `pkg clean` empties the seed source; the resulting empty re-announce deregisters the daemon until a new package appears — cleaning the cache stops you from seeding. Timeout and ping cadence values are deferred to an ADR; the cadence must be shorter than the timeout. |  |  |
+| **Assumptions/ Comments** | Announce-time hashing is deliberately omitted: it would cost a full read of the cache for no security benefit, since integrity is verified end-to-end by the downloader. A stale or bit-rotted file costs one wasted transfer and a blacklist entry on the requester's side. Running `pkg clean` empties the seed source; the resulting empty re-announce deregisters the daemon until a new package appears — cleaning the cache stops you from seeding. Timeout and ping cadence are pinned by tracker protocol v0.2 at `TIMEOUT = 60s` and `PING_INTERVAL = 20s`; both are config-overridable and the only hard rule is that the cadence stays shorter than the timeout. |  |  |
  
 ---
  
