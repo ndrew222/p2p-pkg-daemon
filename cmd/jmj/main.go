@@ -15,13 +15,36 @@ import (
 // TEMPORARY STUB: exists only to exercise internal/discovery end-to-end
 // Owner of cmd/jmj: replace freely
 
+// applyOverrides copies the flags the user actually set onto cfg. An empty
+// string means the flag was not given, so the config (or its default) stands.
+// Shared by both modes so the generator and the daemon can never drift on
+// which flags they honour.
+func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, tempDir, cache string) {
+	if tracker != "" {
+		cfg.TrackerURL = tracker
+	}
+	if facadeAddr != "" {
+		cfg.FacadeAddr = facadeAddr
+	}
+	if servingAddr != "" {
+		cfg.ServingAddr = servingAddr
+	}
+	if tempDir != "" {
+		cfg.TempDir = tempDir
+	}
+	if cache != "" {
+		cfg.CacheDir = cache
+	}
+}
+
 func main() {
 	// each flags below returns a *string, as command line hasnt been read yet, pointer points to those empty slots to be filled later
 	// ---- Define flags ----
 	var (
 		tracker    = flag.String("tracker", "", "Tracker URL (overrides config)")
-		addr       = flag.String("addr", "", "Listen address (overrides config)")
-		buffer     = flag.String("buffer", "", "Buffer directory (overrides config)")
+		facadeAddr = flag.String("facade-addr", "", "Loopback address pkg reaches the mirror facade on (overrides config)")
+		servingArg = flag.String("serving-addr", "", "Address peers reach this daemon on; its port is announced to the tracker (overrides config)")
+		tempDir    = flag.String("temp-dir", "", "Scratch directory for in-flight downloads (overrides config)")
 		cache      = flag.String("cache", "", "pkg cache directory, read-only (overrides config)")
 		configPath = flag.String("config", "", "Path to config file (default: $HOME/.config/jmj/config.json)")
 		genConfig  = flag.Bool("generate-config", false, "Generate config JSON to stdout and exit")
@@ -57,18 +80,7 @@ func main() {
 		// what you want; defaults are valid by construction.
 		cfg := config.DefaultConfig()
 
-		if *tracker != "" {
-			cfg.TrackerURL = *tracker
-		}
-		if *addr != "" {
-			cfg.ListenAddr = *addr
-		}
-		if *buffer != "" {
-			cfg.BufferDir = *buffer
-		}
-		if *cache != "" {
-			cfg.CacheDir = *cache
-		}
+		applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache)
 
 		// Fields only: the generator produces a config for whatever host
 		// will run the daemon, so it must not demand that THIS host
@@ -103,18 +115,7 @@ func main() {
 	}
 
 	// 2. Merge flag overrides (only if flag was explicitly provided)
-	if *tracker != "" {
-		cfg.TrackerURL = *tracker
-	}
-	if *addr != "" {
-		cfg.ListenAddr = *addr
-	}
-	if *buffer != "" {
-		cfg.BufferDir = *buffer
-	}
-	if *cache != "" {
-		cfg.CacheDir = *cache
-	}
+	applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache)
 
 	// 3. Validate merged config
 	if err := config.Validate(cfg); err != nil {

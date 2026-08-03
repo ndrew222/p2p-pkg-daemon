@@ -98,8 +98,13 @@ func TestCacheChangeReachesTheTracker(t *testing.T) {
 	d := &Daemon{
 		config: &config.DaemonConfig{
 			TrackerURL: srv.URL,
-			ListenAddr: "127.0.0.1:9001",
-			CacheDir:   cacheDir,
+			// The announced port comes from serving_addr. facade_addr is
+			// deliberately a different port here, so a regression that
+			// reintroduced the old single-address derivation would show
+			// up as the wrong number on the wire.
+			FacadeAddr:  "127.0.0.1:9001",
+			ServingAddr: "0.0.0.0:9002",
+			CacheDir:    cacheDir,
 		},
 	}
 
@@ -118,8 +123,8 @@ func TestCacheChangeReachesTheTracker(t *testing.T) {
 	if len(first.Packages) != 0 {
 		t.Errorf("startup announce = %v, want an empty list", first.Packages)
 	}
-	if first.ServingPort != 9001 {
-		t.Errorf("servingPort = %d, want 9001 (derived from listen_addr)", first.ServingPort)
+	if first.ServingPort != 9002 {
+		t.Errorf("servingPort = %d, want 9002 (the port half of serving_addr)", first.ServingPort)
 	}
 
 	// pkg installs something.
