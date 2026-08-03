@@ -90,6 +90,41 @@ pins the useful side effect of `DisallowUnknownFields`: a v0.1 daemon talking
 to a v0.2 tracker is rejected loudly instead of being registered with an empty
 package list.
 
+## Commit 2 — `internal/tracker`
+
+State is now `IP -> {servingPort, packages, deadline}` (§State). The old
+`peerID -> {addr, lastSeen, cids}` plus `cid -> holders` pair becomes
+`ip -> record` plus `nameVersion -> set of IPs`. Same two-map shape, different
+keys; the reverse index still exists so a lookup does not scan every
+registration.
+
+Behavioural changes that are not just renames:
+
+- **`Ping` takes an IP, not a request.** There is no ping body in v0.2. It
+  also now rejects a ping from an entry that is *past its deadline but not yet
+  swept*: the old code compared `lastSeen` only in `Peers`, so a daemon that
+  went dark for longer than the timeout could keep its stale package list alive
+  by pinging in the gap before the sweeper ran.
+- **Empty announce deletes the entry** rather than storing an empty list. This
+  is the `pkg clean` deregistration path.
+- **`Peers` caps at `MaxPeers = 3`** and returns a non-nil empty slice on a
+  miss. Non-nil matters on the wire: a nil slice marshals to `null`, and the
+  spec requires `{"peers": []}`. Map iteration order is random so which three
+  holders a caller gets varies — left alone deliberately, it spreads load for
+  free.
+- **`Deadline` replaces `LastSeen`.** The spec models expiry as a deadline; a
+  stored deadline also makes the per-tracker `timeout` override work without
+  every comparison site having to know about it.
+- **`NewWithTimeout`** exists because §Constants says `TIMEOUT` is
+  config-overridable, and because the expiry tests would otherwise take a
+  minute each.
+
+`tracker` had no tests either. `TestLifeCycle` walks §"One complete life
+cycle" in order. The announce helper validates every fixture through
+`proto.AnnounceRequest.Validate` first, so a test cannot pass on a body the
+wire layer would reject. `TestOneDaemonPerIP` pins the known NAT limitation the
+spec accepts, so it can only change deliberately.
+
 ## Areas of uncertainty
 
 1. **Name-version grammar.** Unspecified, as above. Left permissive on purpose.
