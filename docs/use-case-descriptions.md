@@ -57,9 +57,9 @@
 |  | 5 | Daemon sends IWant(packageName-version) to the tracker |  |
 |  | 6 | Tracker returns a list of peers (IP:port) that have announced the package |  |
 |  | 7 | Daemon tries the peers in the order returned, skipping any on its local blacklist |  |
-|  | 8 | Loop until downloaded or peers exhausted: daemon opens a plain HTTP-over-TCP connection to the peer's advertised IP:port, requests the package, and streams the bytes into a temporary buffer |  |
-|  | 9 | Daemon computes the hash of the buffered bytes and compares it with the expected hash from pkg's repository database |  |
-|  | 10 | On a match, daemon serves the bytes to pkg as a mirror response; pkg re-verifies, writes the file to its own cache, and installs |  |
+|  | 8 | Loop until downloaded or peers exhausted: daemon issues `GET /pkg/packageName-version` over plain HTTP/TCP to the peer's advertised IP:port and streams the response body into a temporary file, hashing as it goes (peer transfer spec v0.2) |  |
+|  | 9 | Daemon compares the streamed byte count and the running hash with the expected size and hash, both read from the same row of pkg's repository database. There is no global transfer size limit — the expected size *is* the limit |  |
+|  | 10 | On a match, daemon streams the temporary file to pkg as a mirror response and then removes it; pkg re-verifies, writes the file to its own cache, and installs |  |
 |  | 11 | The cache watcher notices the new file in the cache and announces it to the tracker (UC-05) |  |
 | **Alternative Flow** | **Error State:** Tracker unreachable |  |  |
 |  | **Step** | **Action** |  |
@@ -71,9 +71,9 @@
 |  | 7b | Daemon returns an HTTP error to pkg |  |
 |  | 8b | pkg tries its next mirror |  |
 |  | **Error State:** Peer sends corrupt data |  |  |
-|  | 9c | Computed hash does not match the expected hash |  |
-|  | 10c | Discard the buffered bytes |  |
-|  | 11c | Mark the peer untrusted in a local blacklist (local only; never reported to the tracker) |  |
+|  | 9c | The streamed size or the computed hash does not match the repository database |  |
+|  | 10c | Remove the temporary file |  |
+|  | 11c | Mark the peer untrusted in a local blacklist (local only; never reported to the tracker). Only a size or hash mismatch blacklists — a `404` means the peer no longer holds the file, not that it lied |  |
 |  | 12c | Select the next peer and re-enter the loop at step 8 |  |
 |  | **Error State:** All peers exhausted |  |  |
 |  | 8d | The loop ends with every peer tried and no verified download |  |
@@ -82,7 +82,7 @@
 |  | **Error State:** Peer unreachable |  |  |
 |  | 8e | Connection to the peer times out |  |
 |  | 9e | Move on to the next peer in the list |  |
-| **Assumptions/ Comments** | The daemon has no package store of its own; it buffers in a temporary directory and needs write access only there. The "fall back to mirror" outcomes are plain HTTP errors — pkg's native mirror fallback does the rest, so pkg is never modified. Packages are identified by name-version strings; integrity comes solely from hashes in pkg's signed repository database. Transport is plain HTTP over TCP with no NAT traversal (ADR-001); a peer that cannot accept inbound connections costs one timeout and a retry. |  |  |
+| **Assumptions/ Comments** | The daemon has no package store of its own; it buffers in a temporary directory (configurable, defaulting to the system temp directory) and needs write access only there. The buffer is per-request and ephemeral: it exists because verification needs the whole file before any byte may reach pkg, not because the daemon keeps anything. The "fall back to mirror" outcomes are plain HTTP errors — pkg's native mirror fallback does the rest, so pkg is never modified. Packages are identified by name-version strings; integrity comes solely from pkg's signed repository database, which supplies the expected hash and the expected size from the same row. Transport is plain HTTP over TCP with no NAT traversal (ADR-001); a peer that cannot accept inbound connections costs one timeout and a retry. The peer wire is specified in `peer-transfer-spec-v0.2.md` and is a different surface from the mirror facade, with its own `/pkg/name-version` namespace. **There is no fixed limit on package size:** the transfer is bounded by the exact expected size, which is a tighter anti-abuse bound than any constant and imposes no ceiling. Neither end holds a package in memory, so the largest package in the repository (2.83 GiB) transfers on a 1 GiB host. |  |  |
  
 ---
  
@@ -121,35 +121,35 @@
  
 | UC-06 | Serve Packages (upload) |  |  |
 | :---- | ----- | :---- | ----- |
-| **Description** | The daemon streams package bytes to a remote daemon that requests them. This is the serving end of the same wire as UC-02's fetch loop, kept as a separate use case because it is a different code path with different failure modes and test obligations — the fuzzer targets this use case's request parsing. pkg is not involved anywhere here; this is daemon-to-daemon traffic. |  |  |
+| **Description** | The daemon streams package bytes to a remote daemon that requests them, over plain HTTP (`peer-transfer-spec-v0.2.md`). This is the serving end of the same wire as UC-02's fetch loop, kept as a separate use case because it is a different code path with different failure modes and test obligations — the fuzzer targets this use case's HTTP surface. pkg is not involved anywhere here; this is daemon-to-daemon traffic. |  |  |
 | **Actors** | Primary | Requesting Daemon (a remote peer's machine, running its own UC-02) |  |
 |  | Secondary | pkg cache (read-only), Tracker (miss path only) |  |
-| **Trigger** | An incoming requestPackage(packageName-version) from a remote daemon |  |  |
+| **Trigger** | An incoming `GET /pkg/packageName-version` from a remote daemon, on the port announced to the tracker as the serving port |  |  |
 | **Precondition** | Daemon is running. Network connectivity is available. |  |  |
 | **Postcondition** | The requesting daemon has received the package bytes (which it verifies on its own end) or a definitive error. |  |  |
 | **Error States** | 1 | Malformed or hostile request |  |
 |  | 2 | Requested package not held locally (e.g. `pkg clean` since the last announce) |  |
 |  | 3 | Connection drops mid-stream |  |
 | **Operational Flow** | **Step** | **Action** |  |
-|  | 1 | Remote daemon sends requestPackage(packageName-version) |  |
-|  | 2 | Daemon validates the request — this is untrusted network input from a remote machine |  |
-|  | 3 | Daemon retrieves the package from the pkg cache (read-only) |  |
-|  | 4 | Daemon streams the bytes to the requester. No hash is computed on this side; the requester verifies against its own repository database |  |
+|  | 1 | Remote daemon sends `GET /pkg/packageName-version` |  |
+|  | 2 | Daemon validates the request — this is untrusted network input from a remote machine. The path namespace is deliberately unlike the mirror facade's, so a seeding daemon is not a syntactically valid pkg mirror |  |
+|  | 3 | Daemon opens the package in the pkg cache (read-only), obtaining a file handle and a size |  |
+|  | 4 | Daemon responds `200` with an accurate `Content-Length` and streams from the open file, so the sending side holds no more than a copy buffer in memory. No hash is computed on this side; the requester verifies against its own repository database |  |
 |  | 5 | Requester signals transfer complete |  |
 | **Alternative Flow** | **Error State:** Malformed or hostile request |  |  |
 |  | **Step** | **Action** |  |
-|  | 2a | Request validation rejects the input |  |
-|  | 3a | Error response sent to the requester |  |
-|  | 4a | Daemon continues serving; garbage input must never crash it |  |
+|  | 2a | Request validation rejects the input — a bad path or an invalid name-version is `400`, a non-`GET` method is `405` |  |
+|  | 3a | Error response sent to the requester, which treats every non-`200` alike and moves to its next peer |  |
+|  | 4a | Daemon continues serving; garbage input must never crash it. The fuzz target is this surface end to end: arbitrary bytes in, never a panic. Request framing itself is the standard library's responsibility |  |
 |  | **Error State:** Package not found |  |  |
 |  | 3b | Cache lookup returns not found |  |
-|  | 4b | Return 404 to the requester; the daemon never serves data it does not hold |  |
+|  | 4b | Return `404` to the requester; the daemon never serves data it does not hold |  |
 |  | 5b | Send a full re-announce to the tracker (UC-05): if one entry has drifted, others may have too |  |
 |  | **Error State:** Connection drops mid-stream |  |  |
 |  | 4c | Connection to the requester is lost while streaming |  |
 |  | 5c | Abort the stream and log the error |  |
 |  | 6c | Recovery belongs to the requester, whose retry loop (UC-02) simply asks another peer |  |
-| **Assumptions/ Comments** | There is no daemon-owned store to poll; existence in the pkg cache plus the requester's end-to-end verification replaces the old "confirm the package is verified" step. |  |  |
+| **Assumptions/ Comments** | There is no daemon-owned store to poll; existence in the pkg cache plus the requester's end-to-end verification replaces the old "confirm the package is verified" step. The serving side has no write path at all — it opens cache files read-only and never buffers, so unlike the fetch side it needs no temporary directory. Response writes are deliberately left without a deadline: a large package over a slow uplink is legitimate traffic, and cutting it off would be bandwidth management, which is out of scope. |  |  |
  
 ---
  
