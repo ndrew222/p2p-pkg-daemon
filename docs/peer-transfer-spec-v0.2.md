@@ -209,13 +209,23 @@ irrespective of size.
 | Response headers | 10s |
 | Body transfer | **none** |
 
-A slow multi-gigabyte transfer over a domestic uplink is legitimate traffic. A
-minimum-throughput rule would be bandwidth management, which `AGENTS.md`
-forbids. The transfer is bounded instead by the exact-size limit above and by
-ordinary TCP failure detection.
+A slow multi-gigabyte transfer over a domestic uplink is legitimate traffic, and
+a wall-clock deadline cannot tell it apart from a stall. The transfer is bounded
+instead by the exact-size limit above and by ordinary TCP failure detection.
 
 Serving side: bound the request headers (10s) and leave the response write
 unbounded, for the same reason.
+
+### A slow peer is out of scope
+
+A peer that accepts the connection, sends headers, and then trickles bytes
+indefinitely is **not a problem this spec solves**. It is the same situation as
+a slow mirror, which pkg has always lived with and which nothing in this project
+is required to improve on. The `LimitReader` bounds how *much* such a peer can
+send; how *long* it takes is not the daemon's concern.
+
+Do not add a minimum-throughput rule, a stall detector, or a transfer deadline
+to address this. There is no user complaining about it.
 
 ## Robustness
 

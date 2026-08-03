@@ -88,4 +88,12 @@ Commit and branch naming: no convention, use your judgment.
   an open file handle. A `[]byte` in either signature is a regression.
 - Peer blacklisting is local-only; nothing is reported to the tracker.
 - No download throttling, no bandwidth management, no NAT traversal (ADR-001). These are out of scope. "No additional features, just implement the use cases."
+  Read that correctly. Rate control is not wrong in principle and this is not a
+  ban on thinking about it. It is out of scope because the earlier attempt at it
+  solved a problem nobody had, and did not even solve *that* coherently. If you
+  ever have a real, observed problem that rate control is the right answer to,
+  say so and make the case — do not smuggle one in, and equally do not cite this
+  line as a reason to leave a genuine defect unfixed.
+- A slow peer is out of scope, exactly as a slow mirror is. Do not add stall
+  detectors, minimum-throughput rules or transfer deadlines to "fix" it.
 ```

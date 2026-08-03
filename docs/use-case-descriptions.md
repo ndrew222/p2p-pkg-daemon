@@ -149,7 +149,7 @@
 |  | 4c | Connection to the requester is lost while streaming |  |
 |  | 5c | Abort the stream and log the error |  |
 |  | 6c | Recovery belongs to the requester, whose retry loop (UC-02) simply asks another peer |  |
-| **Assumptions/ Comments** | There is no daemon-owned store to poll; existence in the pkg cache plus the requester's end-to-end verification replaces the old "confirm the package is verified" step. The serving side has no write path at all — it opens cache files read-only and never buffers, so unlike the fetch side it needs no temporary directory. Response writes are deliberately left without a deadline: a large package over a slow uplink is legitimate traffic, and cutting it off would be bandwidth management, which is out of scope. |  |  |
+| **Assumptions/ Comments** | There is no daemon-owned store to poll; existence in the pkg cache plus the requester's end-to-end verification replaces the old "confirm the package is verified" step. The serving side has no write path at all — it opens cache files read-only and never buffers, so unlike the fetch side it needs no temporary directory. Response writes are deliberately left without a deadline: a large package over a slow uplink is legitimate traffic, and a wall-clock deadline cannot distinguish it from a stall. A peer that trickles bytes indefinitely is out of scope in the same way a slow mirror is. |  |  |
  
 ---
  

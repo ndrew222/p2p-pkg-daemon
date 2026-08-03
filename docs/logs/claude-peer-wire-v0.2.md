@@ -145,16 +145,25 @@ the forbidden "bandwidth management," which is why I did not invent a limit.
 Recorded as open. **Not raised with the owner yet; worth raising before the
 serving side is implemented.**
 
-### 4. Timeouts
+### 4. Timeouts — raised and closed
 
-The spec removes the total-transfer deadline entirely and bounds only dial and
-response headers. I am confident that capping a multi-gigabyte transfer by wall
-clock is wrong, and equally that a minimum-throughput rule would be the
-bandwidth management `AGENTS.md` forbids. What is left unaddressed is a peer
-that accepts the connection, sends headers, and then trickles bytes forever. The
-`LimitReader` bounds how *much* it can send but not how *long* it can take.
-Flagged here rather than solved, because every solution I can construct is a
-throughput rule wearing a different hat.
+The spec removes the total-transfer deadline and bounds only dial and response
+headers. I flagged the residual case — a peer that sends headers and then
+trickles bytes forever — as unresolved, on the reasoning that every fix I could
+construct was a throughput rule in disguise and `AGENTS.md` forbids those.
+
+The owner closed it: a slow peer is out of scope in exactly the way a slow
+mirror is, and pkg has always lived with slow mirrors. There is no problem here
+to solve.
+
+The owner also corrected my reading of the constraint itself. "No bandwidth
+management" is not a principled prohibition on rate control; it records that an
+earlier attempt solved a problem nobody had, incoherently. I had been treating
+the line as a fence to reason around, which is why I logged a non-problem as an
+open uncertainty instead of recognising it as out of scope. `AGENTS.md` now
+states the actual reasoning so the next agent does not repeat the mistake in
+either direction — neither smuggling rate control in, nor citing the line as an
+excuse to leave a real defect alone.
 
 ## What is deliberately not done
 
