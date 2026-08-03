@@ -6,28 +6,29 @@ participant "Serving Daemon\n(THIS machine)" as Daemon
 participant "pkg cache\n(/var/cache/pkg, read-only)" as Cache
 participant Tracker
  
-note over RemotePeer, Daemon : Same transfer as UC-02's fetch loop,\nseen from the uploader's side.\npkg is NOT involved anywhere here —\nthis is daemon-to-daemon traffic.
- 
-RemotePeer -> Daemon: requestPackage(packageName-version)
+note over RemotePeer, Daemon : Same transfer as UC-02's fetch loop,\nseen from the uploader's side.\npkg is NOT involved anywhere here —\nthis is daemon-to-daemon traffic.\nWire: docs/peer-transfer-spec-v0.2.md
+
+RemotePeer -> Daemon: GET /pkg/packageName-version
 activate Daemon
- 
+note right of Daemon : An ordinary HTTP server on the port\nannounced to the tracker as servingPort.\nThe namespace is deliberately NOT the\nfacade's .../All/name-version.pkg —\na seeding daemon must not be a\nsyntactically valid pkg mirror.
+
 Daemon -> Daemon : validateRequest()
-note right : Network input from an UNTRUSTED\nremote daemon — not user input,\nso not pkg's job. Malformed or\nhostile messages must be rejected\nwithout crashing (fuzzer target,\nper proposal deliverables).
- 
-Daemon -> Cache: retrieve(packageName-version)
+note right : Network input from an UNTRUSTED\nremote daemon — not user input,\nso not pkg's job. Malformed or\nhostile requests must be rejected\nwithout crashing. The fuzz target is\nthis HTTP surface end to end: arbitrary\nbytes in, never a panic. Request framing\nitself is now the stdlib's job.
+
+Daemon -> Cache: open(packageName-version)
 activate Cache
- 
+
 alt package exists locally
-Cache --> Daemon: packageBytes
+Cache --> Daemon: open file handle + size
 deactivate Cache
-Daemon --> RemotePeer: streamPackageBytes()
-note over Daemon, RemotePeer: Requester verifies the hash\non its own end (UC-02).
+Daemon --> RemotePeer: 200, Content-Length, streamed body
+note over Daemon, RemotePeer: Served from an open file, not a byte\nslice, so the sender is constant-memory\ntoo. NO hash is computed here — the\nrequester verifies end to end (UC-02).
 RemotePeer --> Daemon : transfer complete
- 
+
 else package not found
 Cache --> Daemon: notFound
 deactivate Cache
-Daemon --> RemotePeer: error("404: package not held")
+Daemon --> RemotePeer: 404 (package not held)
 Daemon -> Tracker: announce(fullPackageList)
 note right : Full re-announce (UC-05):\nif one entry drifted, others\nmay have too (e.g. pkg clean).\nDaemon never serves data\nit does not hold.
 end
