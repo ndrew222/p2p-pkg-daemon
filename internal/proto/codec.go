@@ -7,10 +7,6 @@ import (
 	"fmt"
 )
 
-// maxBodySize caps the bytes we are attempting to decode
-// prevents malicious peer from exhuasting memory with huge input
-const maxBodySize = 1 << 20 // 1Mib
-
 var ErrTooLarge = errors.New("proto: payload exceeds maximum size")
 
 // Deocde parses JSON bytes into dst, which must be a pointer to a struct
@@ -18,8 +14,10 @@ var ErrTooLarge = errors.New("proto: payload exceeds maximum size")
 
 func Decode(data []byte, dst any) error {
 
-	// rejects huge data
-	if len(data) > maxBodySize {
+	// rejects huge data. The tracker also caps the body before reading it
+	// (http.MaxBytesReader); this is the second line of defence, for bytes
+	// that arrived some other way.
+	if len(data) > MaxBodyBytes {
 		return ErrTooLarge
 	}
 
