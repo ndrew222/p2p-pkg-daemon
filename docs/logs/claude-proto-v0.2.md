@@ -157,6 +157,48 @@ and queried on `?cid=`.
 one tracker and then asserts it is still serving correctly, which is the
 actual claim being made. It doubles as the fuzz seed corpus.
 
+## Commit 4 — `internal/discovery`
+
+`keepalive.go` was already written for v0.2 — its `Tracker` interface is
+literally `Ping() error` / `Announce(port int, packages []string) error`, with
+a comment saying "discovery.Client will satisfy this once wire spec v0.2
+lands". This commit is that. The comment is now a compile-time assertion.
+
+So `Client.RunHeartbeat` was **deleted, not fixed**. `KeepAlive` supersedes it
+and is strictly better: `RunHeartbeat` pinged unconditionally, where `KeepAlive`
+tracks `registered` and stays quiet while nothing is on the tracker, which is
+the daemon-side obligation in §"One complete life cycle" ("it must NOT keep
+pinging while it has nothing registered; a ping would just get a 404 and loop
+for nothing"). `Stop`/`stopChan` went with it — `KeepAlive.Run` already takes a
+`done` channel.
+
+`Client` also lost its `peerID` and `addr` fields. There is no identity to
+carry: the tracker keys on the connection's source IP.
+
+The two assertions in `client.go` are the whole point of the migration:
+
+```go
+var (
+	_ Tracker         = (*Client)(nil)
+	_ peer.PeerLister = (*Client)(nil)
+)
+```
+
+The second one is what was impossible before. `internal/peer` imports only
+`peerwire`, so `discovery -> peer` introduces no cycle.
+
+Other changes:
+
+- `Peers` returns `[]string` of dialable `host:port`, built through
+  `PeerInfo.Addr()`. It validates the reply before returning it — the tracker
+  is not fully trusted and its response feeds a dialler.
+- An empty peer list is **not** an error. The facade maps "no peers" to 404
+  and "tracker unreachable" to 502, and pkg behaves differently for each, so
+  collapsing them here would break UC-02.
+- `Ping` sends no body and no Content-Type, via `http.NewRequest` rather than
+  `Post`.
+- Success is `200`, not `204`.
+
 ## Areas of uncertainty
 
 1. **Name-version grammar.** Unspecified, as above. Left permissive on purpose.
