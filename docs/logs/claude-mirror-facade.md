@@ -82,6 +82,10 @@ rewrite `RunHeartbeat`. Resolutions:
   side. A hash-mismatching peer is currently logged and skipped for that
   request only. This is a genuine gap against UC-02.
 
+  **RESOLVED** in a later session — `internal/peer/blacklist.go`, see
+  `docs/logs/claude-peer-blacklist.md`. The rest of the open questions below
+  are unchanged and still with the spec owner.
+
 ## Bug found in existing code
 
 `internal/peer/serve.go:38-44` — `Server.Serve` logs and continues on *every*
@@ -90,3 +94,6 @@ hot loop, burning a core and flooding logs. My tests hit it immediately when
 they closed a test listener; I worked around it by leaking the listener instead
 of fixing another feature's file. The fix is to return on a non-temporary
 error. Not mine to make — flagging it.
+
+**RESOLVED** in a later session, exactly that way; the leaked-listener
+workaround is gone. See `docs/logs/claude-peer-blacklist.md`.

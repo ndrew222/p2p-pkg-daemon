@@ -50,11 +50,7 @@ func startPeer(t *testing.T, cache fakeCache) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	// Deliberately NOT closed on cleanup: peer.Server.Serve spins on a closed
-	// listener (it logs and retries every Accept error, including the
-	// permanent one), so closing here burns a core and floods the test log.
-	// Leaking the listener until the test binary exits is the lesser evil
-	// until that loop is fixed. See the work log.
+	t.Cleanup(func() { ln.Close() })
 	srv := &peer.Server{Source: cache}
 	go srv.Serve(ln)
 	return ln.Addr().String()
@@ -230,6 +226,45 @@ func TestFacadeNeverServesUnverifiedBytes(t *testing.T) {
 	}
 	if body, _ := io.ReadAll(rec.Body); string(body) == "tampered" {
 		t.Fatal("facade served unverified bytes to pkg")
+	}
+}
+
+// UC-02 §11c/§7: the blacklist is the daemon's, not the request's. A peer that
+// serves corrupt bytes for one request must be skipped by the next one.
+func TestFacadeBlacklistOutlivesOneRequest(t *testing.T) {
+	const pkgName = "nginx-1.24.0_2"
+	const pkgPath = "/latest/All/nginx-1.24.0_2.pkg"
+	content := []byte("package bytes")
+
+	corruptPeer := startPeer(t, fakeCache{pkgName: []byte("tampered")})
+	goodPeer := startPeer(t, fakeCache{pkgName: content})
+
+	f := &Facade{
+		Peers:  fakeLister{addrs: []string{corruptPeer, goodPeer}},
+		Hashes: fakeHashes{pkgName: sha256Hex(content)},
+	}
+
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, pkgPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", rec.Code)
+	}
+	if !f.Blacklist.Blocked(corruptPeer) {
+		t.Fatal("corrupt peer was not blacklisted")
+	}
+
+	// Second request: same peer list, and the corrupt peer must not be tried
+	// again. (peer-level tests assert the skip by counting connections.)
+	rec = httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, pkgPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second request status = %d, want 200", rec.Code)
+	}
+	if f.Blacklist.Blocked(goodPeer) {
+		t.Fatal("the verifying peer must not be blacklisted")
+	}
+	if got := f.Blacklist.Addrs(); len(got) != 1 || got[0] != corruptPeer {
+		t.Fatalf("blacklist = %v, want exactly [%s]", got, corruptPeer)
 	}
 }
 

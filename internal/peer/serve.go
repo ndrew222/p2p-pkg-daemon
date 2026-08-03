@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"errors"
 	"log"
 	"net"
 	"time"
@@ -32,14 +33,41 @@ func (s *Server) ListenAndServe(addr string) error {
 	return s.Serve(ln)
 }
 
+// acceptRetryDelay bounds the back-off after a temporary Accept failure
+// (typically EMFILE): long enough that the loop is not a spin, short enough
+// that seeding resumes as soon as descriptors free up. Same shape as
+// net/http.Server.Serve.
+const (
+	acceptRetryDelayMin = 5 * time.Millisecond
+	acceptRetryDelayMax = time.Second
+)
+
 func (s *Server) Serve(ln net.Listener) error {
 	log.Printf("peer: seed server listening on %s", ln.Addr())
+	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("peer: accept: %v", err)
+			// A permanent error -- above all a closed listener, which is how
+			// shutdown reaches this loop -- must end Serve. Previously every
+			// error was logged and retried, so a closed listener span the loop
+			// at full tilt, burning a core and flooding the log.
+			var ne net.Error
+			if !errors.As(err, &ne) || !ne.Timeout() {
+				log.Printf("peer: accept: %v; seed server stopping", err)
+				return err
+			}
+			// Temporary: back off and keep serving.
+			if delay == 0 {
+				delay = acceptRetryDelayMin
+			} else if delay *= 2; delay > acceptRetryDelayMax {
+				delay = acceptRetryDelayMax
+			}
+			log.Printf("peer: accept: %v; retrying in %v", err, delay)
+			time.Sleep(delay)
 			continue
 		}
+		delay = 0
 		go s.handle(conn)
 	}
 }

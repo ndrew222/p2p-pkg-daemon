@@ -49,9 +49,16 @@ type PackageHashes interface {
 // Facade serves pkg. Peers resolves who holds a package (the tracker client);
 // Hashes supplies the expected hash. A nil Hashes means the repository
 // database is not wired up yet, and every package request answers 404.
+//
+// Blacklist is the daemon's local record of peers that have served corrupt
+// bytes (UC-02 §11c). It lives on the facade rather than per request precisely
+// so it outlasts one request: a peer that fails verification is skipped by
+// every later fetch too. Zero value ready to use; use one Facade per daemon so
+// there is one list. A Facade must not be copied once used.
 type Facade struct {
-	Peers  peer.PeerLister
-	Hashes PackageHashes
+	Peers     peer.PeerLister
+	Hashes    PackageHashes
+	Blacklist peer.Blacklist
 }
 
 // ServeHTTP implements http.Handler.
@@ -81,11 +88,12 @@ func (f *Facade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // servePackage runs UC-02 steps 5-10 for one package.
 //
-// The peer loop is written out here rather than delegating to peer.Download
+// The peer list is fetched here rather than delegating to peer.Download
 // because Download collapses "tracker returned nothing" and "every peer
 // failed" into one ErrNoPeers, and the mirror surface has to tell those apart:
 // the first is a 404 (this mirror holds nothing), the second a 502 (peers
-// claimed it and failed to deliver).
+// claimed it and failed to deliver). The loop itself is peer.FetchFirst, which
+// is where blacklist skipping and marking live.
 func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
 	if f.Hashes == nil {
 		log.Printf("facade: %q: no repository database wired up", nameVersion)
@@ -113,36 +121,30 @@ func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
 		return
 	}
 
-	// Try peers in tracker order. A peer that times out, errors, or returns
-	// bytes that fail verification costs one attempt and we move on.
-	//
-	// NOTE: UC-02 step 11c also requires marking a hash-mismatching peer in a
-	// local blacklist. No blacklist type exists yet, and it belongs to the
-	// fetch loop rather than the mirror surface, so it is not implemented
-	// here -- flagged in the work log.
-	for _, addr := range addrs {
-		data, err := peer.FetchFromPeer(addr, nameVersion, expectedHash)
-		if err != nil {
-			log.Printf("facade: %q: peer %s: %v", nameVersion, addr, err)
-			continue
-		}
-
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write(data); err != nil {
-			// pkg hung up mid-response. Nothing to recover; the status line
-			// is already sent.
-			log.Printf("facade: %q: write to pkg: %v", nameVersion, err)
-			return
-		}
-		log.Printf("facade: served %q from %s (%d bytes)", nameVersion, addr, len(data))
+	// Try peers in tracker order, skipping any already blacklisted. A peer
+	// that times out or errors costs one attempt; one that returns bytes
+	// failing verification is blacklisted on the way past (UC-02 §11c) so
+	// later requests do not pay for it again.
+	data, err := peer.FetchFirst(addrs, nameVersion, expectedHash, &f.Blacklist)
+	if err != nil {
+		// Non-empty peer list, no verified bytes: either every attempt failed
+		// or everything on the list is already known corrupt. Both are an
+		// upstream fault, not "this mirror does not have it".
+		log.Printf("facade: %q: %d peers exhausted: %v", nameVersion, len(addrs), err)
+		httpError(w, http.StatusBadGateway, "no peer could serve a verified copy")
 		return
 	}
 
-	// Every peer tried, none verified.
-	log.Printf("facade: %q: %d peers exhausted", nameVersion, len(addrs))
-	httpError(w, http.StatusBadGateway, "no peer could serve a verified copy")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(data); err != nil {
+		// pkg hung up mid-response. Nothing to recover; the status line is
+		// already sent.
+		log.Printf("facade: %q: write to pkg: %v", nameVersion, err)
+		return
+	}
+	log.Printf("facade: served %q (%d bytes)", nameVersion, len(data))
 }
 
 // packageRequest classifies a request path.

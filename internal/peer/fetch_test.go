@@ -63,7 +63,7 @@ func (s stubLister) Peers(nameVersion string) ([]string, error) { return []strin
 func TestDownloadThroughLister(t *testing.T) {
 	content := []byte("package via download")
 	addr := startTestPeer(t, content)
-	got, err := Download(stubLister{addr: addr}, "curl-8.6.0", hashOf(content))
+	got, err := Download(stubLister{addr: addr}, "curl-8.6.0", hashOf(content), nil)
 	if err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
