@@ -10,14 +10,14 @@ participant Tracker
 
 == Generation: no side effects, no privileges ==
 
-User -> Gen : jmj -generate-config [-tracker ...] [-addr ...] [-cache ...]
+User -> Gen : jmj -generate-config [-tracker ...] [-facade-addr ...] [-serving-addr ...] [-temp-dir ...] [-cache ...]
 activate Gen
 
 Gen -> Gen : defaults + flags
 note right : Flags fully determine the output.\nThe existing config is NOT read as a\nmerge base: the usual invocation is\n"> config.json" and the shell truncates\na redirect target BEFORE jmj starts, so\nthat file is already empty by now.\nSee the note at the foot of this diagram.
 
 Gen -> Gen : validateFields()
-note right : Values only — port range, address\nformat, tracker URL, paths non-empty.\nNo filesystem access at all, so a config\ncan be generated on one machine for\nanother
+note right : Values only — port range, address\nformat, tracker URL, paths non-empty,\nand facade_addr is a loopback address.\nNo filesystem access at all, so a config\ncan be generated on one machine for\nanother
 
 alt invalid setting value
 Gen --> User : stderr: "Invalid setting: <field>", exit 1
@@ -42,7 +42,12 @@ activate Config
 
 alt file readable
 Config --> Daemon : settings
-note right : Keys absent from the JSON take\ntheir default, not the zero value,\nso a config written by an older\nbuild keeps working
+note right : Keys absent from the JSON take\ntheir default, not the zero value,\nso a config that simply predates a\nnew key keeps working
+
+else file uses removed keys
+Config --> Daemon : legacyKeyError
+Daemon --> User : error naming the key and its replacement; refuse to start
+note right : listen_addr became facade_addr plus\nserving_addr; buffer_dir became\ntemp_dir. Unknown keys are dropped\nsilently by the JSON decoder, so\nsaying nothing would start the daemon\non default ports with the user's\nsetting ignored. The file is NOT moved\naside — it is wrong, not corrupt, and\nstill holds settings its owner wants
 
 else file missing
 Config --> Daemon : notFound
@@ -56,19 +61,22 @@ end
 deactivate Config
 
 Daemon -> Daemon : validate() against this machine
-note right : buffer_dir created if absent and\nprobed for writability (daemon-owned).\ncache_dir must ALREADY exist and is\nnever created — the pkg cache is\nread-only to the daemon
+note right : temp_dir created if absent and\nprobed for writability (daemon-owned).\ncache_dir must ALREADY exist and is\nnever created — the pkg cache is\nread-only to the daemon
 
 alt environment invalid
 Daemon --> User : error naming the offending path; refuse to start
 note right : Config file untouched —\nthe daemon never writes it
 
 else environment ok
+Daemon -> Daemon : listen on facade_addr and serving_addr
+note right : Two listeners, and they are not\ninterchangeable. facade_addr is\nloopback and serves pkg; serving_addr\nis public and serves peers. Only the\nserving port reaches the tracker
+
 Daemon -> Daemon : watch cache_dir, scan for packages
 
-Daemon -> Tracker : ping()
+Daemon -> Tracker : announce(servingPort, full list)
 activate Tracker
-note right of Tracker : Registration per liveness\nprotocol (UC-05). An empty cache\nannounces nothing and stays quiet
-Tracker --> Daemon : acknowledgement (peer registered)
+note right of Tracker : Registration per liveness protocol\n(UC-05). Startup announces rather than\npings: a ping from an unregistered\ndaemon can only earn a 404. An empty\ncache announces an empty list, which\nis the deregistration path and exactly\nright for a daemon with nothing to serve
+Tracker --> Daemon : 200 (registered)
 deactivate Tracker
 
 Daemon --> User : "Daemon configured and ready"
