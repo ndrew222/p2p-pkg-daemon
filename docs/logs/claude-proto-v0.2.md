@@ -125,6 +125,38 @@ cycle" in order. The announce helper validates every fixture through
 wire layer would reject. `TestOneDaemonPerIP` pins the known NAT limitation the
 spec accepts, so it can only change deliberately.
 
+## Commit 3 — `cmd/trac`
+
+The handlers were v0.1: they read a `peer_id` out of the body, answered `204`,
+and queried on `?cid=`.
+
+- **Success is `200`, not `204`.** The §Endpoint summary table says `200` for
+  all three paths. `204` was never spec'd; it just happened to be what the
+  demo returned.
+- **Identity comes from `r.RemoteAddr`**, via `net.SplitHostPort`. There is a
+  test (`TestIdentityIgnoresForwardedHeaders`) asserting `X-Forwarded-For` and
+  `X-Real-IP` are ignored, because the moment a header is trusted, any client
+  can register on any other machine's behalf and every entry in the registry
+  is keyed on that value.
+- **`POST /ping` parses nothing.** Any body is drained and discarded, not
+  rejected. The 404 carries `{"status":"unknown"}` and has a comment on it
+  saying it is load-bearing, because it looks exactly like a bug to anyone
+  reading the handler cold.
+- **`413` is now distinct from `400`.** `http.MaxBytesReader` (not
+  `io.LimitReader` — the latter silently truncates an oversized body into
+  something that might still parse) gives the oversized-body 413;
+  `proto.ErrTooManyPackages` gives the oversized-list 413. Everything else
+  malformed stays 400.
+- **`recoverPanics` wraps the mux.** `net/http` already recovers per
+  connection, but it kills the connection silently; this returns a 500 and
+  logs the path.
+- **`newMux` is split out of `main`** so the tests drive real routing,
+  including the 405s that come from the method patterns.
+
+`TestMalformedInput` runs every case from the §Definition of done list against
+one tracker and then asserts it is still serving correctly, which is the
+actual claim being made. It doubles as the fuzz seed corpus.
+
 ## Areas of uncertainty
 
 1. **Name-version grammar.** Unspecified, as above. Left permissive on purpose.
