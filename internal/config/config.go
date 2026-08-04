@@ -1,4 +1,4 @@
-//This is the configuration library. It handles loading, validating, and saving configs.
+//This is the configuration library. It handles loading and validating configs.
 
 package config
 
@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 )
 
@@ -28,26 +27,32 @@ type DaemonConfig struct {
 	// source port of our outbound HTTP connection is unrelated to it.
 	ServingAddr string `json:"serving_addr"`
 
-	BufferDir string `json:"buffer_dir"`
+	// TempDir is scratch space for in-flight downloads. Ephemeral and
+	// per-request: verification needs the whole file before any byte may
+	// reach pkg, so a download is spooled here and deleted immediately
+	// after. It is NOT a store -- the daemon has none, and serves straight
+	// from the pkg cache.
+	TempDir string `json:"temp_dir"`
 
 	// CacheDir is pkg's package cache, which the daemon watches to learn
-	// what it can serve. READ-ONLY: the daemon writes only to BufferDir
-	// and its config path. Unlike BufferDir, this one is never created --
+	// what it can serve. READ-ONLY: the daemon writes only to TempDir
+	// and its config path. Unlike TempDir, this one is never created --
 	// see Validate.
 	CacheDir string `json:"cache_dir"`
 }
 
 // DefaultConfig returns a config with hardcoded defaults.
-// Need to change later just a proof of concept.
 func DefaultConfig() *DaemonConfig {
-	home, _ := os.UserHomeDir()
 	return &DaemonConfig{
 		TrackerURL: "http://127.0.0.1:8080",
 		FacadeAddr: "127.0.0.1:9001",
 		// All interfaces: peers are by definition on other machines, so
 		// unlike the facade this one cannot be loopback.
 		ServingAddr: "0.0.0.0:9002",
-		BufferDir:   filepath.Join(home, ".cache", "jmj"),
+		// The OS scratch directory, not a directory of our own under
+		// ~/.cache. Downloads here are per-request and deleted on
+		// completion; nothing needs to survive a reboot.
+		TempDir: os.TempDir(),
 		// FreeBSD's pkgng cache, as named in UC-05, UC-06 and the
 		// use-case table. Overridable so the daemon can be exercised
 		// on a non-FreeBSD box.
@@ -177,8 +182,8 @@ func ValidateFields(cfg *DaemonConfig) error {
 		return err
 	}
 
-	if cfg.BufferDir == "" {
-		return fmt.Errorf("buffer_dir must be set")
+	if cfg.TempDir == "" {
+		return fmt.Errorf("temp_dir must be set")
 	}
 	if cfg.CacheDir == "" {
 		return fmt.Errorf("cache_dir must be set (pkg's package cache, e.g. /var/cache/pkg)")
@@ -198,18 +203,20 @@ func Validate(cfg *DaemonConfig) error {
 		return err
 	}
 
-	// BufferDir: must be creatable/writable.
-	if err := os.MkdirAll(cfg.BufferDir, 0755); err != nil {
-		return fmt.Errorf("buffer_dir not creatable/writable: %w", err)
+	// TempDir: must be creatable/writable. Unlike the pkg cache this one is
+	// daemon-owned, so creating it is correct.
+	if err := os.MkdirAll(cfg.TempDir, 0755); err != nil {
+		return fmt.Errorf("temp_dir not creatable/writable: %w", err)
 	}
-	// Also test write access by creating a temp file? MkdirAll ensures directory exists,
-	// but permissions might be restrictive. We can attempt to create a temporary file.
-	tmp, err := os.CreateTemp(cfg.BufferDir, "jmj-write-test-*")
+	// MkdirAll succeeding does not prove we can write files into it, which
+	// is the thing downloads actually need, so probe with the same call the
+	// download path makes.
+	tmp, err := os.CreateTemp(cfg.TempDir, "jmj-write-test-*")
 	if err != nil {
-		return fmt.Errorf("buffer_dir not writable: %w", err)
+		return fmt.Errorf("temp_dir not writable: %w", err)
 	}
-	os.Remove(tmp.Name()) // clean up
 	tmp.Close()
+	os.Remove(tmp.Name())
 
 	// CacheDir: must already exist, and must be a directory.
 	//

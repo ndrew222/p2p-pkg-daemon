@@ -15,7 +15,7 @@ func validConfig(t *testing.T) *DaemonConfig {
 		TrackerURL:  "http://127.0.0.1:8080",
 		FacadeAddr:  "127.0.0.1:9001",
 		ServingAddr: "0.0.0.0:9002",
-		BufferDir:   filepath.Join(t.TempDir(), "buffer"),
+		TempDir:     filepath.Join(t.TempDir(), "scratch"),
 		CacheDir:    t.TempDir(),
 	}
 }
@@ -26,15 +26,15 @@ func TestValidateAcceptsAValidConfig(t *testing.T) {
 	}
 }
 
-// BufferDir is daemon-owned, so Validate creates it. This is the contrast case
+// TempDir is daemon-owned, so Validate creates it. This is the contrast case
 // for the CacheDir tests below.
-func TestValidateCreatesBufferDir(t *testing.T) {
+func TestValidateCreatesTempDir(t *testing.T) {
 	cfg := validConfig(t)
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if info, err := os.Stat(cfg.BufferDir); err != nil || !info.IsDir() {
-		t.Errorf("buffer_dir was not created: %v", err)
+	if info, err := os.Stat(cfg.TempDir); err != nil || !info.IsDir() {
+		t.Errorf("temp_dir was not created: %v", err)
 	}
 }
 
@@ -176,14 +176,14 @@ func TestDefaultConfigPassesFieldValidation(t *testing.T) {
 // generator on every machine anyone develops on.
 func TestValidateFieldsIgnoresTheFilesystem(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.BufferDir = filepath.Join(t.TempDir(), "not-created-either")
+	cfg.TempDir = filepath.Join(t.TempDir(), "not-created-either")
 
 	if err := ValidateFields(cfg); err != nil {
 		t.Fatalf("ValidateFields() on the defaults = %v, want nil", err)
 	}
 	// And no side effects: it must not have created anything.
-	if _, err := os.Stat(cfg.BufferDir); !os.IsNotExist(err) {
-		t.Errorf("ValidateFields() created %q", cfg.BufferDir)
+	if _, err := os.Stat(cfg.TempDir); !os.IsNotExist(err) {
+		t.Errorf("ValidateFields() created %q", cfg.TempDir)
 	}
 }
 
@@ -195,13 +195,22 @@ func TestValidateFieldsRequiresPathsToBeSet(t *testing.T) {
 			t.Error("empty cache_dir = nil, want an error")
 		}
 	})
-	t.Run("buffer_dir", func(t *testing.T) {
+	t.Run("temp_dir", func(t *testing.T) {
 		cfg := DefaultConfig()
-		cfg.BufferDir = ""
+		cfg.TempDir = ""
 		if err := ValidateFields(cfg); err == nil {
-			t.Error("empty buffer_dir = nil, want an error")
+			t.Error("empty temp_dir = nil, want an error")
 		}
 	})
+}
+
+// The default temp_dir is the OS scratch directory, not a directory of the
+// daemon's own. The buffer is per-request and ephemeral; nothing about a
+// download needs to survive a reboot, so there is no ~/.cache/jmj.
+func TestDefaultConfigTempDir(t *testing.T) {
+	if got := DefaultConfig().TempDir; got != os.TempDir() {
+		t.Errorf("default temp_dir = %q, want %q", got, os.TempDir())
+	}
 }
 
 func TestDefaultConfigCacheDir(t *testing.T) {

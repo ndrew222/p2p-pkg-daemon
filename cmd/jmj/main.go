@@ -19,7 +19,7 @@ import (
 // string means the flag was not given, so the config (or its default) stands.
 // Shared by both modes so the generator and the daemon can never drift on
 // which flags they honour.
-func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, buffer, cache string) {
+func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, tempDir, cache string) {
 	if tracker != "" {
 		cfg.TrackerURL = tracker
 	}
@@ -29,8 +29,8 @@ func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, 
 	if servingAddr != "" {
 		cfg.ServingAddr = servingAddr
 	}
-	if buffer != "" {
-		cfg.BufferDir = buffer
+	if tempDir != "" {
+		cfg.TempDir = tempDir
 	}
 	if cache != "" {
 		cfg.CacheDir = cache
@@ -44,7 +44,7 @@ func main() {
 		tracker    = flag.String("tracker", "", "Tracker URL (overrides config)")
 		facadeAddr = flag.String("facade-addr", "", "Loopback address pkg reaches the mirror facade on (overrides config)")
 		servingArg = flag.String("serving-addr", "", "Address peers reach this daemon on; its port is announced to the tracker (overrides config)")
-		buffer     = flag.String("buffer", "", "Buffer directory (overrides config)")
+		tempDir    = flag.String("temp-dir", "", "Scratch directory for in-flight downloads (overrides config)")
 		cache      = flag.String("cache", "", "pkg cache directory, read-only (overrides config)")
 		configPath = flag.String("config", "", "Path to config file (default: $HOME/.config/jmj/config.json)")
 		genConfig  = flag.Bool("generate-config", false, "Generate config JSON to stdout and exit")
@@ -80,7 +80,7 @@ func main() {
 		// what you want; defaults are valid by construction.
 		cfg := config.DefaultConfig()
 
-		applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *buffer, *cache)
+		applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache)
 
 		// Fields only: the generator produces a config for whatever host
 		// will run the daemon, so it must not demand that THIS host
@@ -115,7 +115,7 @@ func main() {
 	}
 
 	// 2. Merge flag overrides (only if flag was explicitly provided)
-	applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *buffer, *cache)
+	applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache)
 
 	// 3. Validate merged config
 	if err := config.Validate(cfg); err != nil {
