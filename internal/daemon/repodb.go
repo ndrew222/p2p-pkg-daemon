@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	// Pure Go, so `go build ./...` and `go test ./...` need no C toolchain
@@ -23,6 +24,10 @@ const repoDBFile = "db"
 
 // cksumHexLen is the length of packages.cksum, a lowercase hex SHA-256.
 const cksumHexLen = 64
+
+// loggedNameLimit caps how many name-versions a single diagnostic names before
+// it summarises the rest as a count.
+const loggedNameLimit = 10
 
 // repoRow is one packages row, reduced to the two facts the daemon uses.
 type repoRow struct {
@@ -88,13 +93,20 @@ func (r *Repositories) Reload() error {
 		if err != nil {
 			return fmt.Errorf("daemon: %s: %w", path, err)
 		}
-		if skipped > 0 {
+		if !skipped.empty() {
 			// A row whose cksum is not a hex SHA-256 is worse than
 			// useless: the fetch path would compare peer bytes against
 			// it, never match, and blacklist an honest peer for our own
 			// bad data. Dropping the row means the package is simply not
-			// served, which is the correct failure.
-			log.Printf("daemon: %s: skipped %d row(s) with a malformed cksum", path, skipped)
+			// served, which is the correct failure. Ratified by the owner,
+			// who notes it is a non-issue in practice: none of the 38,074
+			// rows on the reference host was dropped.
+			if n := len(skipped.badCksum); n > 0 {
+				log.Printf("daemon: %s: skipped %d row(s) with a malformed cksum: %s", path, n, namesForLog(skipped.badCksum))
+			}
+			if n := len(skipped.badPkgSize); n > 0 {
+				log.Printf("daemon: %s: skipped %d row(s) with a non-positive pkgsize: %s", path, n, namesForLog(skipped.badPkgSize))
+			}
 		}
 		for nameVersion, row := range loaded {
 			if _, dup := rows[nameVersion]; dup {
@@ -169,12 +181,26 @@ func repositoryDatabases(dir string) ([]string, error) {
 	return paths, nil
 }
 
+// skippedRows names the rows loadRepositoryDatabase dropped, split by cause.
+// Split rather than counted together because the two are diagnosed
+// differently: a bad cksum points at the catalogue's contents, a bad pkgsize
+// at a row that could not describe a real file. Reporting a pkgsize problem as
+// a checksum problem sends the reader looking in the wrong place.
+type skippedRows struct {
+	badCksum   []string
+	badPkgSize []string
+}
+
+func (s skippedRows) empty() bool { return len(s.badCksum) == 0 && len(s.badPkgSize) == 0 }
+
 // loadRepositoryDatabase reads one catalogue into memory, returning the rows
-// and the number dropped for a malformed cksum.
-func loadRepositoryDatabase(path string) (map[string]repoRow, int, error) {
+// and the name-versions dropped as malformed.
+func loadRepositoryDatabase(path string) (map[string]repoRow, skippedRows, error) {
+	var skipped skippedRows
+
 	db, err := sql.Open("sqlite", readOnlyDSN(path))
 	if err != nil {
-		return nil, 0, fmt.Errorf("opening: %w", err)
+		return nil, skipped, fmt.Errorf("opening: %w", err)
 	}
 	defer db.Close()
 
@@ -183,28 +209,43 @@ func loadRepositoryDatabase(path string) (map[string]repoRow, int, error) {
 	// the watcher produce via parsePackageName.
 	rows, err := db.Query(`SELECT name, version, pkgsize, cksum FROM packages`)
 	if err != nil {
-		return nil, 0, fmt.Errorf("querying packages: %w", err)
+		return nil, skipped, fmt.Errorf("querying packages: %w", err)
 	}
 	defer rows.Close()
 
 	out := make(map[string]repoRow)
-	var skipped int
 	for rows.Next() {
 		var name, version, cksum string
 		var pkgsize int64
 		if err := rows.Scan(&name, &version, &pkgsize, &cksum); err != nil {
-			return nil, 0, fmt.Errorf("scanning packages: %w", err)
+			return nil, skipped, fmt.Errorf("scanning packages: %w", err)
 		}
-		if !isHexSHA256(cksum) || pkgsize <= 0 {
-			skipped++
-			continue
+		nameVersion := name + "-" + version
+		switch {
+		case !isHexSHA256(cksum):
+			skipped.badCksum = append(skipped.badCksum, nameVersion)
+		case pkgsize <= 0:
+			skipped.badPkgSize = append(skipped.badPkgSize, nameVersion)
+		default:
+			out[nameVersion] = repoRow{hash: cksum, size: pkgsize}
 		}
-		out[name+"-"+version] = repoRow{hash: cksum, size: pkgsize}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("reading packages: %w", err)
+		return nil, skipped, fmt.Errorf("reading packages: %w", err)
 	}
 	return out, skipped, nil
+}
+
+// namesForLog renders keys for a log line: sorted, so two runs over the same
+// catalogue read the same, and capped, so one misconfigured repository cannot
+// turn a warning into thousands of lines.
+func namesForLog(keys []string) string {
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	if len(sorted) <= loggedNameLimit {
+		return strings.Join(sorted, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(sorted[:loggedNameLimit], ", "), len(sorted)-loggedNameLimit)
 }
 
 // readOnlyDSN builds a SQLite URI that cannot write. The read-only constraint

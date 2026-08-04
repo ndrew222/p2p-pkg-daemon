@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,6 +155,65 @@ func TestOpenRepositoriesSkipsMalformedRows(t *testing.T) {
 		if _, ok := repo.ExpectedHash(nv); ok {
 			t.Errorf("ExpectedHash(%q) found a malformed row", nv)
 		}
+	}
+}
+
+// The two causes are reported apart, so a pkgsize problem is not diagnosed as a
+// checksum problem. Dropping is right either way; saying which is right is what
+// makes the warning actionable.
+func TestLoadRepositoryDatabaseSeparatesTheSkipCauses(t *testing.T) {
+	dir := t.TempDir()
+	path := writeRepoDB(t, dir, "FreeBSD-ports", []fixtureRow{
+		{"good", "1.0", 10, hash64('a')},
+		{"uppercase", "1.0", 10, strings.ToUpper(hash64('b'))},
+		{"nonhex", "1.0", 10, strings.Repeat("z", 64)},
+		{"zerosize", "1.0", 0, hash64('c')},
+		{"negativesize", "1.0", -1, hash64('d')},
+	})
+
+	loaded, skipped, err := loadRepositoryDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded %d row(s), want 1", len(loaded))
+	}
+	if got, want := namesForLog(skipped.badCksum), "nonhex-1.0, uppercase-1.0"; got != want {
+		t.Errorf("badCksum = %q, want %q", got, want)
+	}
+	if got, want := namesForLog(skipped.badPkgSize), "negativesize-1.0, zerosize-1.0"; got != want {
+		t.Errorf("badPkgSize = %q, want %q", got, want)
+	}
+}
+
+// A row failing both checks is counted once, under the cksum, because that is
+// the cause the reader must act on first: no hash means no verification at all.
+func TestSkipCausesDoNotDoubleCount(t *testing.T) {
+	dir := t.TempDir()
+	path := writeRepoDB(t, dir, "FreeBSD-ports", []fixtureRow{{"both", "1.0", 0, "nope"}})
+
+	_, skipped, err := loadRepositoryDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped.badCksum) != 1 || len(skipped.badPkgSize) != 0 {
+		t.Errorf("badCksum = %v, badPkgSize = %v; want the row counted once, under the cksum", skipped.badCksum, skipped.badPkgSize)
+	}
+}
+
+// The cap keeps one misconfigured catalogue from turning a warning into
+// thousands of lines, and the tail says how much was elided.
+func TestNamesForLogCapsTheList(t *testing.T) {
+	var keys []string
+	for i := 0; i < loggedNameLimit+5; i++ {
+		keys = append(keys, fmt.Sprintf("pkg%02d-1.0", i))
+	}
+	got := namesForLog(keys)
+	if !strings.HasSuffix(got, " and 5 more") {
+		t.Errorf("namesForLog(%d keys) = %q, want a %q tail", len(keys), got, " and 5 more")
+	}
+	if strings.Count(got, ",") != loggedNameLimit-1 {
+		t.Errorf("namesForLog named %d key(s), want %d", strings.Count(got, ",")+1, loggedNameLimit)
 	}
 }
 
