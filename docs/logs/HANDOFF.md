@@ -86,8 +86,16 @@ Gate passes. What exists and works:
 - `internal/peer/blacklist.go` — the local peer blacklist (§5.5). In-memory, no
   expiry, not persisted; one list per `Facade`.
 
-What does not exist at all: any wiring that puts the **seed server** on a port
-(the facade half of §5.4 is done; the peer half waits on §5.3).
+What does not exist at all: the **seed half, and it is worse than "not wired"**.
+There is no production `PackageSource` implementation anywhere in the tree — the
+only three implementors are two test fakes and `cmd/demo`'s in-memory store, and
+nothing reads the pkg cache for file *contents* (the watcher reads it for names
+only). `peer.Server` is constructed in exactly one place, `cmd/demo/main.go`.
+
+So **§5.3 is a build, not just a migration**: on top of the wire change its
+migration table describes, it has to write the cache-backed seeder that has
+never existed. Budget for that. The facade half of §5.4 is done; the peer half
+needs both.
 
 **The daemon should now do something useful against a real FreeBSD host, and
 nobody has checked.** The facade is mounted, the catalogue is read, and the
@@ -395,6 +403,15 @@ observations; nothing proves the observations are consistent with each other.
   alongside it; the helper now closes its listener via `t.Cleanup`.
 - `cmd/demo` depends on `peerwire` and on `PackageSource.Get` returning
   `[]byte`. It must be rewritten in §5.3, not deleted.
+- **The daemon announces a serving port nothing listens on.** `daemon.go`
+  announces `config.ServingPort()` to the tracker and the keep-alive announces
+  the whole cache, but no seed server is mounted and none can be until §5.3
+  builds one (§2). Every peer that acts on our tracker entry therefore dials
+  `serving_addr` and gets connection-refused. That correctly does not blacklist
+  us — a dial failure never does — so the cost is one wasted attempt per peer,
+  and it is paid by the rest of the swarm rather than by this daemon. Worth
+  knowing before anyone reads a trial's peer logs and concludes the tracker is
+  broken.
 
 ## 7. Information we do not have — get it before deciding
 
