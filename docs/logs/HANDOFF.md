@@ -28,8 +28,15 @@ commit as the work.
 - **Work log required.** `docs/logs/<author>-<feature>.md` for every feature,
   including your areas of uncertainty and whether you raised them.
 
-Current branch: `worktree-repo-db-reader`, ahead of `main` by the repository
-database reader (§5.2), the §4.3 merge, and the mounted facade (§5.4).
+Current branch: `main`. The repository database reader (§5.2), the §4.3 merge
+and the mounted facade (§5.4) all landed there via PR #17 (`461e687`); the
+`worktree-repo-db-reader` branch this file used to name is merged and gone.
+
+**Read `docs/logs/claude-verification-rulings.md` before starting.** The owner
+has since ruled on §4.3's two riders and §5.5's three leftovers, and on the
+unreachable size-mismatch branch. That file is a *plan*, not a work log — the
+rulings are recorded but nothing below has been edited to match them yet, so
+§4.3 and §5.5 still read as open. Executing it is the next commit.
 
 ## 1. Document map — what to trust
 
