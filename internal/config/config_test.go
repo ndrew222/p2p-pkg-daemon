@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -242,14 +243,48 @@ func TestConfigWithoutCacheDirTakesTheDefault(t *testing.T) {
 	if cfg.FacadeAddr != "127.0.0.1:9005" {
 		t.Errorf("facade_addr = %q, want the value from the file", cfg.FacadeAddr)
 	}
-	// The key it lacks takes the default.
+	// The keys it lacks take the defaults.
 	if cfg.CacheDir != "/var/cache/pkg" {
 		t.Errorf("cache_dir = %q, want the default", cfg.CacheDir)
+	}
+	if cfg.ServingAddr != DefaultConfig().ServingAddr {
+		t.Errorf("serving_addr = %q, want the default", cfg.ServingAddr)
 	}
 	// The file must still be there -- an old-but-parsable config is not
 	// corrupt, so Load must not have moved it aside.
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("Load() moved a parsable config aside: %v", err)
+	}
+}
+
+// A v0.1 config is valid JSON, so encoding/json would silently drop its
+// listen_addr and buffer_dir and start the daemon on defaults -- on the wrong
+// ports, with the user's settings ignored. Say so instead.
+func TestLoadRejectsLegacyKeys(t *testing.T) {
+	for _, key := range []string{"listen_addr", "buffer_dir"} {
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			body := `{"tracker_url":"http://10.0.0.1:8080","` + key + `":"x"}`
+			if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("Load() with %q = nil, want an error", key)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("error %q does not name the offending key %q", err, key)
+			}
+			// A legacy config is wrong, not corrupt: it holds settings
+			// the user still wants, so it must be left where it is.
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("Load() moved a legacy config aside: %v", err)
+			}
+			if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+				t.Error("Load() created a .bak for a legacy config")
+			}
+		})
 	}
 }
 

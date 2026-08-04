@@ -60,6 +60,15 @@ func DefaultConfig() *DaemonConfig {
 	}
 }
 
+// legacyKeys are v0.1 config keys that no longer exist. A config carrying one
+// is reported rather than silently ignored: encoding/json drops unknown keys,
+// so a user who had set listen_addr would otherwise get the default facade and
+// serving addresses with no indication that their setting went nowhere.
+var legacyKeys = map[string]string{
+	"listen_addr": "replaced by facade_addr (loopback, where pkg reaches the daemon) and serving_addr (public, announced to the tracker)",
+	"buffer_dir":  "renamed to temp_dir",
+}
+
 // read parses the config at path with NO side effects: nothing is created,
 // moved or written, and a corrupt file is left exactly where it is. It reports
 // whether the file was corrupt so Load can decide what to do about it.
@@ -85,7 +94,31 @@ func read(path string) (cfg *DaemonConfig, corrupt bool, err error) {
 	if err := json.Unmarshal(data, out); err != nil {
 		return DefaultConfig(), true, nil
 	}
+
+	// Parsable, but possibly written against the v0.1 schema. This is an
+	// error, not a corruption: the file is valid JSON and moving it aside
+	// would destroy settings the user still wants, so say what to change
+	// and let them change it.
+	if err := checkLegacyKeys(data); err != nil {
+		return nil, false, err
+	}
 	return out, false, nil
+}
+
+// checkLegacyKeys reports a v0.1 key by name, with what replaced it.
+func checkLegacyKeys(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		// Not an object at all; Unmarshal into DaemonConfig already
+		// classified this file, so nothing to add.
+		return nil
+	}
+	for key, replacement := range legacyKeys {
+		if _, present := raw[key]; present {
+			return fmt.Errorf("config uses the removed key %q: %s", key, replacement)
+		}
+	}
+	return nil
 }
 
 // Load is read plus the one repair the daemon performs at startup: a corrupt
