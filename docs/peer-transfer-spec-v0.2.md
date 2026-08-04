@@ -152,6 +152,11 @@ The bound therefore becomes **per-package and exact**:
 This is a strictly *stronger* anti-DoS bound than 64 MiB — a hostile peer cannot
 overrun by one byte — while removing the ceiling entirely.
 
+**Abandoning a peer on the size bound is not blacklisting.** The requester moves
+to the next holder and the peer keeps whatever standing it had; only a hash
+mismatch marks it untrusted (UC-02 §11c). The size is a bound on the transfer,
+never a verdict on the peer.
+
 **Invariant this depends on:** hash and size come from the same repository
 database row, so any package that reaches the fetch path has both. The facade
 already returns `404` when no expected hash is found, before any peer is

@@ -63,7 +63,7 @@
 |  | 6 | Tracker returns a list of peers (IP:port) that have announced the package |  |
 |  | 7 | Daemon tries the peers in the order returned, skipping any on its local blacklist |  |
 |  | 8 | Loop until downloaded or peers exhausted: daemon issues `GET /pkg/packageName-version` over plain HTTP/TCP to the peer's advertised IP:port and streams the response body into a temporary file, hashing as it goes (peer transfer spec v0.2) |  |
-|  | 9 | Daemon compares the streamed byte count and the running hash with the expected size and hash, both read from the same row of pkg's repository database. There is no global transfer size limit — the expected size *is* the limit |  |
+|  | 9 | The expected size and hash come from the same row of pkg's repository database and do different jobs. The size **bounds** the transfer: a `Content-Length` that disagrees with it abandons the peer before a byte of body is read, and a body that overruns it abandons the peer mid-stream. The hash is the **verdict** on the bytes that arrive. There is no global transfer size limit — the expected size *is* the limit |  |
 |  | 10 | On a match, daemon streams the temporary file to pkg as a mirror response and then removes it; pkg re-verifies, writes the file to its own cache, and installs |  |
 |  | 11 | The cache watcher notices the new file in the cache and announces it to the tracker (UC-05) |  |
 | **Alternative Flow** | **Error State:** Tracker unreachable |  |  |
@@ -76,9 +76,9 @@
 |  | 7b | Daemon returns an HTTP error to pkg |  |
 |  | 8b | pkg tries its next mirror |  |
 |  | **Error State:** Peer sends corrupt data |  |  |
-|  | 9c | The streamed size or the computed hash does not match the repository database |  |
+|  | 9c | The computed hash does not match the repository database row. A size disagreement is *not* this state: it abandons the peer at 12c without passing through 11c |  |
 |  | 10c | Remove the temporary file |  |
-|  | 11c | Mark the peer untrusted in a local blacklist (local only; never reported to the tracker). Only a size or hash mismatch blacklists — a `404` means the peer no longer holds the file, not that it lied |  |
+|  | 11c | Mark the peer untrusted in a local blacklist (local only; never reported to the tracker). **Only a hash mismatch blacklists.** A body of the wrong length fails the hash anyway if it is read to completion, so a separate size verdict is a second route to the same conclusion and a second thing to keep consistent; and only a hash mismatch is evidence the peer sent bytes that are *wrong*, rather than bytes that are not the ones we asked for. A `404` does not blacklist either — it means the peer no longer holds the file, not that it lied |  |
 |  | 12c | Select the next peer and re-enter the loop at step 8 |  |
 |  | **Error State:** All peers exhausted |  |  |
 |  | 8d | The loop ends with every peer tried and no verified download |  |
@@ -87,7 +87,7 @@
 |  | **Error State:** Peer unreachable |  |  |
 |  | 8e | Connection to the peer times out |  |
 |  | 9e | Move on to the next peer in the list |  |
-| **Assumptions/ Comments** | The daemon has no package store of its own; it buffers in a temporary directory (configurable, defaulting to the system temp directory) and needs write access only there. The buffer is per-request and ephemeral: it exists because verification needs the whole file before any byte may reach pkg, not because the daemon keeps anything. The "fall back to mirror" outcomes are plain HTTP errors — pkg's native mirror fallback does the rest, so pkg is never modified. Packages are identified by name-version strings; integrity comes solely from pkg's signed repository database, which supplies the expected hash and the expected size from the same row. Transport is plain HTTP over TCP with no NAT traversal (ADR-001); a peer that cannot accept inbound connections costs one timeout and a retry. The peer wire is specified in `peer-transfer-spec-v0.2.md` and is a different surface from the mirror facade, with its own `/pkg/name-version` namespace. **There is no fixed limit on package size:** the transfer is bounded by the exact expected size, which is a tighter anti-abuse bound than any constant and imposes no ceiling. Neither end holds a package in memory, so the largest package in the repository (2.83 GiB) transfers on a 1 GiB host. |  |  |
+| **Assumptions/ Comments** | The daemon has no package store of its own; it buffers in a temporary directory (configurable, defaulting to the system temp directory) and needs write access only there. The buffer is per-request and ephemeral: it exists because verification needs the whole file before any byte may reach pkg, not because the daemon keeps anything. The "fall back to mirror" outcomes are plain HTTP errors — pkg's native mirror fallback does the rest, so pkg is never modified. Packages are identified by name-version strings; integrity comes solely from pkg's signed repository database, which supplies the expected hash and the expected size from the same row. The two are not interchangeable: the size is a transfer bound and the hash is the verdict, so a size disagreement costs the peer this transfer while only a hash mismatch costs it the daemon's trust. Transport is plain HTTP over TCP with no NAT traversal (ADR-001); a peer that cannot accept inbound connections costs one timeout and a retry. The peer wire is specified in `peer-transfer-spec-v0.2.md` and is a different surface from the mirror facade, with its own `/pkg/name-version` namespace. **There is no fixed limit on package size:** the transfer is bounded by the exact expected size, which is a tighter anti-abuse bound than any constant and imposes no ceiling. Neither end holds a package in memory, so the largest package in the repository (2.83 GiB) transfers on a 1 GiB host. |  |  |
  
 ---
  
