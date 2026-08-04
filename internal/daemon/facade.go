@@ -301,10 +301,12 @@ var ErrNoRepositoryDatabase = errors.New("daemon: no repository database configu
 // ListenAndServe runs the facade on addr, which is config.FacadeAddr --
 // loopback, enforced by config.ValidateFields.
 //
-// Still NOT wired into Daemon.startHTTPServerLocked, but the reason has
-// changed: the missing config field exists now, and what remains is Check
-// failing without a repository database, which nothing implements yet.
-// Mounting it is one call once that lands.
+// The facade IS wired into Daemon.startHTTPServerLocked, which has mounted it
+// at the root of facade_addr since §5.4. That path does not come through here:
+// it needs its own *http.Server to shut down on reconfiguration, so it runs
+// Check itself and serves the same handler. This entry point is for a caller
+// that wants the facade and nothing else, and it has no other caller in the
+// tree today.
 func (f *Facade) ListenAndServe(addr string) error {
 	if err := f.Check(); err != nil {
 		return err
