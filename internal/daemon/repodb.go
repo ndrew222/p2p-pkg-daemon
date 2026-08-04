@@ -87,7 +87,7 @@ func (r *Repositories) Reload() error {
 	}
 
 	rows := make(map[string]repoRow)
-	var collisions int
+	var collisions []string
 	for _, path := range paths {
 		loaded, skipped, err := loadRepositoryDatabase(path)
 		if err != nil {
@@ -110,20 +110,36 @@ func (r *Repositories) Reload() error {
 		}
 		for nameVersion, row := range loaded {
 			if _, dup := rows[nameVersion]; dup {
-				// First repository wins, in sorted path order, so the
-				// outcome is at least deterministic. Measured: zero
-				// collisions across both repositories on the reference
-				// host (37,835 and 239 rows). UNRATIFIED -- see the work
-				// log; the owner may prefer refusing to start.
-				collisions++
+				// Ratified: the first repository in sorted path order
+				// wins, deterministically, and the colliding names are
+				// logged. Measured zero collisions across both
+				// repositories on the reference host (37,835 and 239
+				// rows).
+				//
+				// The choice cannot be delegated to pkg even though pkg
+				// has repository priority and re-verifies our bytes
+				// against the row it picked (UC-02 step 10): the facade
+				// needs an expected hash *before* it fetches, and the
+				// swarm has no repository dimension at all -- the tracker
+				// announces a bare name-version and the peer namespace is
+				// /pkg/<name-version> by design, so peers cannot say which
+				// of two colliding files they hold.
+				//
+				// First-wins beats refusing to start because the downside
+				// is bounded: pkg's re-verification turns a wrong pick
+				// into a failed install, never a corrupt one. The one
+				// thing it does not cover is that a wrong row makes us
+				// blacklist an honest peer for our own bad data -- which
+				// is why the names go in the log.
+				collisions = append(collisions, nameVersion)
 				continue
 			}
 			rows[nameVersion] = row
 		}
 		log.Printf("daemon: loaded %d package(s) from %s", len(loaded), path)
 	}
-	if collisions > 0 {
-		log.Printf("daemon: %d name-version(s) appear in more than one repository; the first in path order won", collisions)
+	if len(collisions) > 0 {
+		log.Printf("daemon: %d name-version(s) appear in more than one repository; the first in path order won: %s", len(collisions), namesForLog(collisions))
 	}
 
 	r.mu.Lock()

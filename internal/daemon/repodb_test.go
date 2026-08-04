@@ -217,9 +217,9 @@ func TestNamesForLogCapsTheList(t *testing.T) {
 	}
 }
 
-// Deterministic, and the count is logged. UNRATIFIED: the owner may prefer
-// refusing to start. Measured zero collisions across both repositories on the
-// reference host.
+// Ratified: first repository in sorted path order wins, deterministically, and
+// the colliding names are logged. Measured zero collisions across both
+// repositories on the reference host.
 func TestCollisionResolvesToFirstPathInOrder(t *testing.T) {
 	dir := t.TempDir()
 	writeRepoDB(t, dir, "aaa-first", []fixtureRow{{"dup", "1.0", 111, hash64('a')}})
