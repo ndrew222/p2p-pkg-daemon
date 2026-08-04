@@ -18,15 +18,25 @@ import (
 // ordinary network conditions, not evidence of a bad actor, and blacklisting on
 // them would evict half a swarm after one flaky minute.
 //
-// UNSPECIFIED, deliberately not invented (see the work log):
+// Three properties, raised as unspecified and since ratified by the owner:
 //
+//   - Keyed by peer address, so a peer that serves corrupt bytes is distrusted
+//     for *everything*, not for the one package it got wrong. Corrupt bytes
+//     are evidence about the peer, not about the file.
 //   - No expiry. The use case says "mark the peer untrusted"; it does not say
 //     entries ever lapse, and any TTL would be a number nobody chose. Entries
 //     therefore live as long as the process.
-//   - No persistence. The daemon holds write permission on its buffer
+//   - No persistence. The daemon holds write permission on its temporary
 //     directory and config path only (UC-01 assumptions), so a blacklist file
 //     would need a storage decision that does not exist. The list starts empty
 //     on every start.
+//
+// Culling is therefore by restart, and that is the whole mechanism: the list
+// is in-memory, so a restart clears it completely. There is no Unblock and none
+// is planned -- something would have to call it, and an admin surface is in no
+// spec, so inventing one would trip AGENTS.md ground rule 2. What the ruling
+// does require is that the log show what a restart would clear, which is why
+// download.go reports the list size on every Block.
 //
 // The zero value is ready to use. All methods are safe for concurrent use and
 // tolerate a nil receiver, so a caller with no blacklist can pass nil and get
@@ -70,8 +80,9 @@ func (b *Blacklist) Len() int {
 	return len(b.blocked)
 }
 
-// Addrs returns the blacklisted addresses in sorted order. For logging and
-// tests; the fetch loop uses Blocked.
+// Addrs returns the blacklisted addresses in sorted order. Used by FetchFirst
+// to log the list a restart would clear, and by tests; the fetch loop itself
+// uses Blocked.
 func (b *Blacklist) Addrs() []string {
 	if b == nil {
 		return nil

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 )
 
 // PeerLister returns the addresses of peers holding a package. It takes a name-version
@@ -40,7 +41,13 @@ func FetchFirst(addrs []string, nameVersion, expectedHash string, bl *Blacklist)
 				// UC-02 §10c-11c: discard the bytes (returning nil does that)
 				// and mark the peer untrusted. Local only.
 				bl.Block(addr)
-				log.Printf("peer: blacklisted %s: corrupt bytes for %q", addr, nameVersion)
+				// Report the whole list, not just this entry. The list
+				// never expires and is never persisted, so a restart is
+				// the only cull there is; the log is the only place an
+				// operator can see what a restart would clear.
+				blocked := bl.Addrs()
+				log.Printf("peer: blacklisted %s: corrupt bytes for %q (%d blacklisted until restart: %s)",
+					addr, nameVersion, len(blocked), strings.Join(blocked, ", "))
 			} else {
 				log.Printf("peer: fetch from %s failed: %v", addr, err)
 			}
