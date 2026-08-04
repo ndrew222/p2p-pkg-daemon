@@ -166,16 +166,15 @@ func (d *Daemon) startHTTPServerLocked() error {
 		d.httpServer.Close()
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
-	})
+	// Deliberately empty. The /ping handler that used to be here was an
+	// invented health endpoint appearing in no spec.
+	//
 	// TODO: the mirror facade (Facade, UC-02/UC-07) and the peer seed
 	// server (peer.Server, UC-06) both still need mounting. Neither can go
 	// on this mux: the facade must be loopback-only on its own port, and
 	// peer.Server speaks the peerwire framing, not HTTP. Both are blocked
 	// on the config change noted in servingPort.
+	mux := http.NewServeMux()
 
 	d.httpServer = &http.Server{
 		Addr:    d.config.ListenAddr,
