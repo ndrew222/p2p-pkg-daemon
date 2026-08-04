@@ -148,13 +148,15 @@ func (d *Daemon) startHTTPServerLocked() error {
 	}
 
 	// Deliberately empty. The /ping handler that used to be here was an
-	// invented health endpoint appearing in no spec.
+	// invented health endpoint appearing in no spec, and it is gone.
 	//
-	// TODO: the mirror facade (Facade, UC-02/UC-07) and the peer seed
-	// server (peer.Server, UC-06) both still need mounting. Neither can go
-	// on this mux: the facade must be loopback-only on its own port, and
-	// peer.Server speaks the peerwire framing, not HTTP. Both are blocked
-	// on the repository database, which nothing implements yet.
+	// TODO: the mirror facade (Facade, UC-02/UC-07) belongs on this
+	// listener -- facade_addr is its address and the loopback rule is
+	// enforced in config. It is not mounted yet because Facade.Check fails
+	// without a repository database, which nothing implements. The peer
+	// seed server (peer.Server, UC-06) goes on serving_addr separately; it
+	// speaks the peerwire framing, not HTTP, until the peer wire migration
+	// lands.
 	mux := http.NewServeMux()
 
 	d.httpServer = &http.Server{
