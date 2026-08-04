@@ -19,12 +19,34 @@ Re-running with the same flags produces the same file, so redirecting onto an
 existing config is well defined.
 
 ```
--tracker   tracker URL                      (default http://127.0.0.1:8080)
--addr      listen address, host:port        (default 127.0.0.1:9001)
--buffer    daemon's temp buffer directory   (default ~/.cache/jmj)
--cache     pkg's package cache, read-only   (default /var/cache/pkg)
--config    which config file to run from    (default ~/.config/jmj/config.json)
+-tracker       tracker URL                        (default http://127.0.0.1:8080)
+-facade-addr   where pkg reaches us, host:port    (default 127.0.0.1:9001)
+-serving-addr  where peers reach us, host:port    (default 0.0.0.0:9002)
+-temp-dir      scratch space for downloads        (default the OS temp directory)
+-cache         pkg's package cache, read-only     (default /var/cache/pkg)
+-config        which config file to run from      (default ~/.config/jmj/config.json)
 ```
+
+The daemon listens on two ports, and they are not interchangeable:
+
+- **`facade_addr`** is the mirror facade — the port `pkg` fetches from. It
+  **must be a loopback address**, and the daemon refuses to start otherwise.
+  This is not advisory: the facade fetches packages from the network on behalf
+  of whoever asks, so reachable from off-host it is an open relay for someone
+  else's bandwidth.
+- **`serving_addr`** is where other daemons fetch packages *from* you. It is
+  public by nature, and its port is the one announced to the tracker. Peers
+  cannot reach a loopback address, so this one is normally left on all
+  interfaces.
+
+`temp_dir` is scratch space for in-flight downloads. A package is spooled there
+while it is being verified and deleted as soon as it has been served — it is not
+a cache and nothing in it is meant to survive. The default is the OS temp
+directory for exactly that reason.
+
+Configs written for older builds are rejected with a message naming the key:
+`listen_addr` became `facade_addr` plus `serving_addr`, and `buffer_dir` became
+`temp_dir`. The file is left alone so you can edit it.
 
 Because generation touches no filesystem, you can generate a config on one
 machine for another — the FreeBSD default `cache_dir` does not have to exist on
@@ -41,6 +63,6 @@ No flags are required. The daemon discovers what it can serve by watching
 something to announce. `SIGHUP` reloads the config without a restart.
 
 At startup — not at generation time — the daemon checks the config against the
-machine it is on: `buffer_dir` is created if absent and probed for writability,
+machine it is on: `temp_dir` is created if absent and probed for writability,
 and `cache_dir` must already exist, because the pkg cache is read-only to the
 daemon and it will never create it.
