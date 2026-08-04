@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode"
@@ -12,12 +13,24 @@ import (
 )
 
 // packageFileExtension is the file extension pkgng uses for package
-// archives in the local cache (/var/cache/pkg). FreeBSD's pkgng uses
-// ".pkg" for its packages (older setups sometimes use ".txz" instead).
+// archives in the local cache (/var/cache/pkg).
 //
-// TODO: confirm this against a real pkg cache directory / with Andrew.
-// If your cache directory actually uses ".txz"
+// Confirmed against FreeBSD 15.1-RELEASE-p1 / pkg 2.7.5: the repository
+// database's meta table reports {"version":2,"packing_format":"tzst",...}
+// and every cached file is ".pkg". The older ".txz" spelling does not
+// appear. This is no longer an assumption.
 const packageFileExtension = ".pkg"
+
+// cksumSuffix matches the "~<hash10>" that pkg appends to a name-version.
+// hash10 is the first 10 characters of the package's cksum -- the same
+// lowercase hex SHA-256 the downloader verifies against -- and it appears in
+// repository paths (All/Hashed/indexinfo-0.3.1_1~ae9dce33aa.pkg) and on the
+// real files in the cache, which the unsuffixed names symlink to.
+//
+// It is never part of the identifier. A peer asks for "indexinfo-0.3.1_1";
+// announcing "indexinfo-0.3.1_1~ae9dce33aa" would advertise a string nobody
+// will ever request.
+var cksumSuffix = regexp.MustCompile(`~[0-9a-f]{10}$`)
 
 // PackageInfo represents a discovered package in the cache directory.
 type PackageInfo struct {
@@ -166,9 +179,14 @@ func (w *Watcher) Stop() {
 }
 
 // parsePackageName extracts the name and version from a file name.
-
+//
+// The "~hash10" suffix is stripped first, so the cache's real file
+// (indexinfo-0.3.1_1~ae9dce33aa.pkg) and the symlink beside it
+// (indexinfo-0.3.1_1.pkg) both yield the same identifier. Shared with the
+// facade, which sees the same suffix in mirror paths.
 func parsePackageName(filename string) (name, version string) {
 	base := strings.TrimSuffix(filename, packageFileExtension)
+	base = cksumSuffix.ReplaceAllString(base, "")
 
 	lastHyphenIndex := strings.LastIndex(base, "-")
 	if lastHyphenIndex == -1 {
@@ -234,6 +252,16 @@ func (w *Watcher) Scan() ([]PackageInfo, error) {
 		if err != nil || info.IsDir() {
 			return err
 		}
+		// Skip symlinks. The pkg cache is flat and full of them: the
+		// unsuffixed name is a link to the real ~hash10 file beside it.
+		// filepath.Walk uses Lstat, so info.Size() here is the length of
+		// the link target string -- 32 bytes for a 5905-byte package --
+		// which fails the repo DB size check and would knock every real
+		// package out of the announce. Taking only the real files loses
+		// nothing: both names parse to the same identifier.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
 		filename := filepath.Base(path)
 		name, ver := parsePackageName(filename)
 
@@ -291,9 +319,18 @@ func (w *Watcher) handleEvent(path string, changeType ChangeType) {
 	name, ver := parsePackageName(filename)
 	var fileSizeBytes int64
 	if changeType != Removed {
-		if info, err := os.Stat(path); err == nil {
-			fileSizeBytes = info.Size()
+		// Lstat, not Stat: a symlink is skipped here for the same reason
+		// Scan skips it. Following it would report the target's size and
+		// hand the same package to the announce twice, once under each
+		// name.
+		info, err := os.Lstat(path)
+		if err != nil {
+			return
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return
+		}
+		fileSizeBytes = info.Size()
 	}
 
 	pkg := PackageInfo{
