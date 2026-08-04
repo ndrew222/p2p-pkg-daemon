@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/peer"
@@ -276,6 +278,61 @@ func TestFacadeOverRealHTTP(t *testing.T) {
 	defer metaResp.Body.Close()
 	if metaResp.StatusCode != http.StatusNotFound {
 		t.Errorf("meta.conf status = %d, want 404", metaResp.StatusCode)
+	}
+}
+
+// UC-02 §8: a download is spooled through temp_dir, and the buffer is
+// per-request -- nothing may be left behind for the next one to find.
+func TestFacadeSpoolsThroughTempDirAndCleansUp(t *testing.T) {
+	const pkgName = "nginx-1.24.0_2"
+	content := []byte("package bytes")
+	tempDir := t.TempDir()
+
+	f := &Facade{
+		Peers:   fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
+		Hashes:  fakeHashes{pkgName: sha256Hex(content)},
+		TempDir: tempDir,
+	}
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/latest/All/nginx-1.24.0_2.pkg", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != string(content) {
+		t.Errorf("body = %q, want %q", got, content)
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("temp_dir still holds %v; the buffer must not outlive the request", names)
+	}
+}
+
+// An unwritable temp_dir is a daemon-side failure, not a missing package: pkg
+// must see a 5xx so it falls through to a real mirror rather than concluding
+// the file does not exist.
+func TestFacadeUnwritableTempDirIs500(t *testing.T) {
+	const pkgName = "nginx-1.24.0_2"
+	content := []byte("package bytes")
+
+	f := &Facade{
+		Peers:   fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
+		Hashes:  fakeHashes{pkgName: sha256Hex(content)},
+		TempDir: filepath.Join(t.TempDir(), "does-not-exist"),
+	}
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/latest/All/nginx-1.24.0_2.pkg", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
 

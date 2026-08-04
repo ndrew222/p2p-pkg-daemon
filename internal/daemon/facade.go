@@ -13,8 +13,10 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -52,6 +54,12 @@ type PackageHashes interface {
 type Facade struct {
 	Peers  peer.PeerLister
 	Hashes PackageHashes
+
+	// TempDir is config.TempDir: where a download is spooled while it is
+	// in flight (UC-02 §8). Empty means os.TempDir(). The file is created
+	// per request and removed before the response returns -- the daemon has
+	// no store and never serves from here.
+	TempDir string
 }
 
 // ServeHTTP implements http.Handler.
@@ -127,13 +135,19 @@ func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
 			continue
 		}
 
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write(data); err != nil {
-			// pkg hung up mid-response. Nothing to recover; the status line
-			// is already sent.
-			log.Printf("facade: %q: write to pkg: %v", nameVersion, err)
+		// Spool the verified bytes through temp_dir before answering.
+		// UC-02 §8: a download lands in the temp buffer, and only a
+		// complete, verified file may reach pkg.
+		//
+		// Note what this costs today: FetchFromPeer has already
+		// materialised the whole package in memory, so the spool is a
+		// disk round-trip that buys nothing yet. It is here because the
+		// peer wire migration makes the fetch streaming, at which point
+		// this file is what keeps a 900 MB package off the heap. Delete
+		// it only together with that.
+		if err := f.spool(w, nameVersion, data); err != nil {
+			log.Printf("facade: %q: %v", nameVersion, err)
+			httpError(w, http.StatusInternalServerError, "cannot buffer the download")
 			return
 		}
 		log.Printf("facade: served %q from %s (%d bytes)", nameVersion, addr, len(data))
@@ -143,6 +157,60 @@ func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
 	// Every peer tried, none verified.
 	log.Printf("facade: %q: %d peers exhausted", nameVersion, len(addrs))
 	httpError(w, http.StatusBadGateway, "no peer could serve a verified copy")
+}
+
+// spool writes verified bytes to a temp file and serves the file to pkg.
+//
+// It returns an error ONLY for failures that happen before anything has been
+// written to w, so the caller can still send a status code. Once the response
+// has begun, a failure is logged and nil is returned: the status line is
+// already on the wire and there is nothing left to say.
+func (f *Facade) spool(w http.ResponseWriter, nameVersion string, data []byte) error {
+	tmp, err := os.CreateTemp(f.TempDir, "jmj-"+sanitiseForFilename(nameVersion)+"-*")
+	if err != nil {
+		return fmt.Errorf("temp file: %w", err)
+	}
+	// The buffer is per-request and ephemeral. Remove it on every path,
+	// including the ones where pkg hangs up on us.
+	defer func() {
+		tmp.Close()
+		if err := os.Remove(tmp.Name()); err != nil && !os.IsNotExist(err) {
+			log.Printf("facade: %q: removing %s: %v", nameVersion, tmp.Name(), err)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("writing %s: %w", tmp.Name(), err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewinding %s: %w", tmp.Name(), err)
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, tmp); err != nil {
+		// pkg hung up mid-response. Nothing to recover.
+		log.Printf("facade: %q: write to pkg: %v", nameVersion, err)
+	}
+	return nil
+}
+
+// sanitiseForFilename keeps a temp file name readable for a human watching
+// temp_dir without letting a name-version off the wire steer where the file
+// lands. Everything outside the name-version alphabet becomes an underscore,
+// so no separator, dot segment or NUL can survive into the path.
+func sanitiseForFilename(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '-', r == '.', r == '_':
+			return r
+		default:
+			return '_'
+		}
+	}, s)
 }
 
 // packageRequest classifies a request path.
@@ -188,14 +256,13 @@ func httpError(w http.ResponseWriter, code int, msg string) {
 // discovering it as a stream of 404s.
 var ErrNoRepositoryDatabase = errors.New("daemon: no repository database configured")
 
-// ListenAndServe runs the facade on addr.
+// ListenAndServe runs the facade on addr, which is config.FacadeAddr --
+// loopback, enforced by config.ValidateFields.
 //
-// NOT wired into Daemon.startHTTPServer yet, deliberately. The facade is
-// pkg-facing and belongs on a loopback port; config.DaemonConfig.ListenAddr is
-// the peer-facing address announced to the tracker as servingPort. UC-01 lists
-// a single "listen port", so there is no config field for a second listener
-// and inventing one is a spec decision, not an implementation detail. Once
-// that field exists, wiring is one call. See the work log.
+// Still NOT wired into Daemon.startHTTPServerLocked, but the reason has
+// changed: the missing config field exists now, and what remains is Check
+// failing without a repository database, which nothing implements yet.
+// Mounting it is one call once that lands.
 func (f *Facade) ListenAndServe(addr string) error {
 	if err := f.Check(); err != nil {
 		return err
