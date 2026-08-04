@@ -19,7 +19,7 @@ import (
 // string means the flag was not given, so the config (or its default) stands.
 // Shared by both modes so the generator and the daemon can never drift on
 // which flags they honour.
-func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, tempDir, cache string) {
+func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, tempDir, cache, repoDB string) {
 	if tracker != "" {
 		cfg.TrackerURL = tracker
 	}
@@ -31,6 +31,9 @@ func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, 
 	}
 	if tempDir != "" {
 		cfg.TempDir = tempDir
+	}
+	if repoDB != "" {
+		cfg.RepoDBDir = repoDB
 	}
 	if cache != "" {
 		cfg.CacheDir = cache
@@ -46,6 +49,7 @@ func main() {
 		servingArg = flag.String("serving-addr", "", "Address peers reach this daemon on; its port is announced to the tracker (overrides config)")
 		tempDir    = flag.String("temp-dir", "", "Scratch directory for in-flight downloads (overrides config)")
 		cache      = flag.String("cache", "", "pkg cache directory, read-only (overrides config)")
+		repoDB     = flag.String("repo-db", "", "Directory holding pkg's repository databases, read-only (overrides config)")
 		configPath = flag.String("config", "", "Path to config file (default: $HOME/.config/jmj/config.json)")
 		genConfig  = flag.Bool("generate-config", false, "Generate config JSON to stdout and exit")
 	// reads os.Args and fill those slots in
@@ -80,7 +84,7 @@ func main() {
 		// what you want; defaults are valid by construction.
 		cfg := config.DefaultConfig()
 
-		applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache)
+		applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache, *repoDB)
 
 		// Fields only: the generator produces a config for whatever host
 		// will run the daemon, so it must not demand that THIS host
@@ -115,7 +119,7 @@ func main() {
 	}
 
 	// 2. Merge flag overrides (only if flag was explicitly provided)
-	applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache)
+	applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache, *repoDB)
 
 	// 3. Validate merged config
 	if err := config.Validate(cfg); err != nil {

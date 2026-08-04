@@ -10,7 +10,7 @@ participant Tracker
 
 == Generation: no side effects, no privileges ==
 
-User -> Gen : jmj -generate-config [-tracker ...] [-facade-addr ...] [-serving-addr ...] [-temp-dir ...] [-cache ...]
+User -> Gen : jmj -generate-config [-tracker ...] [-facade-addr ...] [-serving-addr ...] [-temp-dir ...] [-cache ...] [-repo-db ...]
 activate Gen
 
 Gen -> Gen : defaults + flags
@@ -61,13 +61,16 @@ end
 deactivate Config
 
 Daemon -> Daemon : validate() against this machine
-note right : temp_dir created if absent and\nprobed for writability (daemon-owned).\ncache_dir must ALREADY exist and is\nnever created — the pkg cache is\nread-only to the daemon
+note right : temp_dir created if absent and\nprobed for writability (daemon-owned).\ncache_dir and repo_db_dir must ALREADY\nexist and are never created — the pkg\ncache and its repository catalogues are\nread-only to the daemon
 
 alt environment invalid
 Daemon --> User : error naming the offending path; refuse to start
 note right : Config file untouched —\nthe daemon never writes it
 
 else environment ok
+Daemon -> Daemon : read repo_db_dir, load every repository catalogue
+note right : Read-only. Supplies each package's\nexpected SHA-256 and exact size —\nthe only source of truth for\nverification. Refuses to start if\nnone can be read: without a catalogue\nthe facade could verify nothing and\nwould answer 404 to everything
+
 Daemon -> Daemon : listen on facade_addr and serving_addr
 note right : Two listeners, and they are not\ninterchangeable. facade_addr is\nloopback and serves pkg; serving_addr\nis public and serves peers. Only the\nserving port reaches the tracker
 

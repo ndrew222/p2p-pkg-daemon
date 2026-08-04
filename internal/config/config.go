@@ -39,6 +39,17 @@ type DaemonConfig struct {
 	// and its config path. Unlike TempDir, this one is never created --
 	// see Validate.
 	CacheDir string `json:"cache_dir"`
+
+	// RepoDBDir holds pkg's repository databases, one subdirectory per
+	// configured repository, each containing a SQLite file named "db".
+	// The daemon reads every one of them to learn each package's expected
+	// hash and size (UC-02 verification, UC-05 announce sanity check).
+	//
+	// READ-ONLY, and more emphatically than CacheDir: these are pkg's
+	// signed catalogues. The daemon opens them in read-only mode and never
+	// creates this directory. Overridable for the same reason CacheDir is
+	// -- so the daemon can be exercised on a non-FreeBSD box.
+	RepoDBDir string `json:"repo_db_dir"`
 }
 
 // DefaultConfig returns a config with hardcoded defaults.
@@ -57,6 +68,11 @@ func DefaultConfig() *DaemonConfig {
 		// use-case table. Overridable so the daemon can be exercised
 		// on a non-FreeBSD box.
 		CacheDir: "/var/cache/pkg",
+		// Where pkg keeps its repository catalogues. Measured on
+		// FreeBSD 15.1-RELEASE-p1: two repositories live here,
+		// FreeBSD-ports and FreeBSD-ports-kmods, so this is a
+		// directory to scan and not a single file to open.
+		RepoDBDir: "/var/db/pkg/repos",
 	}
 }
 
@@ -221,6 +237,9 @@ func ValidateFields(cfg *DaemonConfig) error {
 	if cfg.CacheDir == "" {
 		return fmt.Errorf("cache_dir must be set (pkg's package cache, e.g. /var/cache/pkg)")
 	}
+	if cfg.RepoDBDir == "" {
+		return fmt.Errorf("repo_db_dir must be set (pkg's repository databases, e.g. /var/db/pkg/repos)")
+	}
 
 	return nil
 }
@@ -264,6 +283,19 @@ func Validate(cfg *DaemonConfig) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("cache_dir %q is not a directory", cfg.CacheDir)
+	}
+
+	// RepoDBDir: same rule as CacheDir and for a stronger reason. These are
+	// pkg's signed repository catalogues; the daemon reads them and must
+	// never create or write them. A missing directory is a misconfiguration,
+	// not something to paper over -- without it the facade cannot verify a
+	// single package and would 404 everything.
+	info, err = os.Stat(cfg.RepoDBDir)
+	if err != nil {
+		return fmt.Errorf("repo_db_dir is not readable (it must already exist; the daemon never creates it): %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("repo_db_dir %q is not a directory", cfg.RepoDBDir)
 	}
 
 	return nil

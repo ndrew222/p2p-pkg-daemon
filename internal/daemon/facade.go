@@ -52,16 +52,19 @@ const hashedDir = "Hashed"
 // ASSUMPTION (unratified, see spec open question 2): the returned string is a
 // lowercase hex SHA-256, matching internal/peer/fetch.go.
 //
-// Kept separate from RepositoryDatabase in watcher.go, which serves the
-// announce-time size check. Both are views of the same repo DB and should
-// probably merge once a real reader exists -- neither has one yet.
+// Declared separately from RepositoryDatabase in watcher.go, which serves the
+// announce-time size check. Both are views of the same repo DB row, and one
+// reader supplies both via the Repository composite in repository.go -- but the
+// narrow interfaces stay, so each consumer's signature still states exactly
+// what it may ask for. See HANDOFF.md §4.3.
 type PackageHashes interface {
 	ExpectedHash(nameVersion string) (hash string, found bool)
 }
 
 // Facade serves pkg. Peers resolves who holds a package (the tracker client);
-// Hashes supplies the expected hash. A nil Hashes means the repository
-// database is not wired up yet, and every package request answers 404.
+// Repo supplies the expected hash and size from pkg's repository database. A
+// nil Repo means the repository database is not wired up yet, and every package
+// request answers 404.
 //
 // Blacklist is the daemon's local record of peers that have served corrupt
 // bytes (UC-02 §11c). It lives on the facade rather than per request precisely
@@ -70,7 +73,7 @@ type PackageHashes interface {
 // there is one list. A Facade must not be copied once used.
 type Facade struct {
 	Peers     peer.PeerLister
-	Hashes    PackageHashes
+	Repo      Repository
 	Blacklist peer.Blacklist
 
 	// TempDir is config.TempDir: where a download is spooled while it is
@@ -114,12 +117,12 @@ func (f *Facade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // claimed it and failed to deliver). The loop itself is peer.FetchFirst, which
 // is where blacklist skipping and marking live.
 func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
-	if f.Hashes == nil {
+	if f.Repo == nil {
 		log.Printf("facade: %q: no repository database wired up", nameVersion)
 		httpError(w, http.StatusNotFound, "no expected hash for this package")
 		return
 	}
-	expectedHash, found := f.Hashes.ExpectedHash(nameVersion)
+	expectedHash, found := f.Repo.ExpectedHash(nameVersion)
 	if !found {
 		log.Printf("facade: %q: not in the repository database", nameVersion)
 		httpError(w, http.StatusNotFound, "no expected hash for this package")
@@ -317,7 +320,7 @@ func (f *Facade) Check() error {
 	if f.Peers == nil {
 		return errors.New("daemon: no peer lister configured")
 	}
-	if f.Hashes == nil {
+	if f.Repo == nil {
 		return ErrNoRepositoryDatabase
 	}
 	return nil

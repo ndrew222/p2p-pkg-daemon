@@ -19,6 +19,7 @@ type Daemon struct {
 	configPath string
 	client     *discovery.Client
 	watcher    *Watcher
+	repo       *Repositories
 	done       chan struct{} // closed to stop the keep-alive loop
 	httpServer *http.Server
 	running    bool
@@ -64,14 +65,56 @@ func Start(cfg *config.DaemonConfig, configPath string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if err := d.startHTTPServerLocked(); err != nil {
-		return fmt.Errorf("failed to start HTTP server: %w", err)
+	// Order matters now. The repository snapshot is what the watcher
+	// sanity-checks sizes against and what the facade verifies hashes from,
+	// and the facade also needs the discovery client, which
+	// startDiscoveryLocked creates. So: catalogue, then discovery, then the
+	// listener that depends on both.
+	if err := d.openRepositoriesLocked(); err != nil {
+		return fmt.Errorf("failed to read the repository database: %w", err)
 	}
 	if err := d.startDiscoveryLocked(); err != nil {
 		return fmt.Errorf("failed to start discovery: %w", err)
 	}
+	if err := d.startHTTPServerLocked(); err != nil {
+		return fmt.Errorf("failed to start HTTP server: %w", err)
+	}
 
 	d.setupReloadHandler()
+	return nil
+}
+
+// repository returns the catalogue as an interface value, or a genuinely nil
+// interface when there is none.
+//
+// This exists to avoid a trap rather than to add a layer. Assigning a nil
+// *Repositories straight into an interface field produces a non-nil interface
+// holding a nil pointer, so every "== nil" check downstream passes and the
+// first method call panics on the nil receiver -- which would defeat both
+// SanityFilter's nil-means-skip branch and Facade.Check's refusal to serve
+// without a catalogue. Production always has one; the nil path exists for
+// callers that construct a Daemon directly.
+func (d *Daemon) repository() Repository {
+	if d.repo == nil {
+		return nil
+	}
+	return d.repo
+}
+
+// openRepositoriesLocked loads pkg's repository catalogues.
+// CALLER MUST HOLD d.mu.
+//
+// Failure is fatal to startup, deliberately. Without a catalogue the daemon
+// cannot verify a single package: the facade would answer 404 to everything and
+// the announce path would advertise packages whose size it never checked. That
+// is a misconfiguration to report, not a degraded mode to run in.
+func (d *Daemon) openRepositoriesLocked() error {
+	repo, err := OpenRepositories(d.config.RepoDBDir)
+	if err != nil {
+		return err
+	}
+	d.repo = repo
+	log.Printf("Repository database: %d packages from %s", repo.Len(), d.config.RepoDBDir)
 	return nil
 }
 
@@ -101,12 +144,12 @@ func (d *Daemon) startDiscoveryLocked() error {
 		}
 	}
 
-	// repoDB is nil: no RepositoryDatabase implementation exists yet, so
-	// SanityFilter degrades to filename-format checks and skips the size
-	// comparison. Safe but weaker -- a truncated package can be announced,
-	// costing one wasted transfer, which the end-to-end hash check on the
-	// downloader's side catches. See the work log.
-	d.watcher = New(d.config.CacheDir, nil, nil, onChange)
+	// The watcher now has a real repository database, so SanityFilter does
+	// the size comparison it was written for: a cached file whose size does
+	// not match the catalogue is not announced. Announcing a truncated
+	// package used to cost a peer one wasted transfer before its hash check
+	// caught it.
+	d.watcher = New(d.config.CacheDir, d.repository(), nil, onChange)
 	if err := d.watcher.Start(); err != nil {
 		return fmt.Errorf("cache watcher: %w", err)
 	}
@@ -147,17 +190,31 @@ func (d *Daemon) startHTTPServerLocked() error {
 		d.httpServer.Close()
 	}
 
-	// Deliberately empty. The /ping handler that used to be here was an
-	// invented health endpoint appearing in no spec, and it is gone.
+	// The mirror facade takes the root. pkg addresses a mirror with whatever
+	// repository path its config produces, so the facade cannot be mounted
+	// under a fixed prefix; packageRequest is what decides which of those
+	// paths are package files and which are metadata (UC-02, UC-07).
 	//
-	// TODO: the mirror facade (Facade, UC-02/UC-07) belongs on this
-	// listener -- facade_addr is its address and the loopback rule is
-	// enforced in config. It is not mounted yet because Facade.Check fails
-	// without a repository database, which nothing implements. The peer
-	// seed server (peer.Server, UC-06) goes on serving_addr separately; it
-	// speaks the peerwire framing, not HTTP, until the peer wire migration
-	// lands.
+	// The peer seed server (peer.Server, UC-06) still goes on serving_addr
+	// separately: it speaks the peerwire framing, not HTTP, until the peer
+	// wire migration lands.
+	//
+	// A restart rebuilds the facade, which resets its in-memory peer
+	// blacklist. That is accepted: the list is local, unpersisted and
+	// advisory, so the cost is at most one wasted transfer per bad peer,
+	// and end-to-end hash verification -- not the blacklist -- is what makes
+	// corrupt bytes impossible.
+	facade := &Facade{
+		Peers:   d.client,
+		Repo:    d.repository(),
+		TempDir: d.config.TempDir,
+	}
+	if err := facade.Check(); err != nil {
+		return fmt.Errorf("mirror facade: %w", err)
+	}
+
 	mux := http.NewServeMux()
+	mux.Handle("/", facade)
 
 	d.httpServer = &http.Server{
 		Addr:    d.config.FacadeAddr,
@@ -213,26 +270,40 @@ func (d *Daemon) Reload() error {
 	servingChanged := d.config.ServingAddr != newCfg.ServingAddr
 	trackerChanged := d.config.TrackerURL != newCfg.TrackerURL
 	cacheChanged := d.config.CacheDir != newCfg.CacheDir
+	repoDBChanged := d.config.RepoDBDir != newCfg.RepoDBDir
 
 	d.config = newCfg
 
-	if facadeChanged {
-		if err := d.startHTTPServerLocked(); err != nil {
-			return fmt.Errorf("failed to restart HTTP server: %w", err)
+	// Rebuild in dependency order, the same order Start uses: the catalogue
+	// feeds the watcher, and the listener depends on both it and the client.
+	if repoDBChanged {
+		if err := d.openRepositoriesLocked(); err != nil {
+			return fmt.Errorf("failed to reload the repository database: %w", err)
 		}
-		log.Printf("HTTP server restarted on %s", d.config.FacadeAddr)
 	}
 
 	// A serving address change means the tracker is advertising a stale
 	// port for us, so discovery has to re-announce. A facade change does
 	// not: nothing about the facade's port reaches the tracker. A cache
-	// change means the watcher is watching the wrong directory.
-	if trackerChanged || servingChanged || cacheChanged {
+	// change means the watcher is watching the wrong directory, and a
+	// repository change means it is sanity-checking against the wrong sizes.
+	if trackerChanged || servingChanged || cacheChanged || repoDBChanged {
 		d.stopDiscoveryLocked()
 		if err := d.startDiscoveryLocked(); err != nil {
 			return fmt.Errorf("failed to restart discovery: %w", err)
 		}
 		log.Printf("Discovery re-announced to %s", d.config.TrackerURL)
+	}
+
+	// The facade holds the discovery client and the repository snapshot, so
+	// it goes stale when either is replaced -- not only when its own address
+	// moves. A tracker change without this would leave the facade asking the
+	// previous tracker who holds a package.
+	if facadeChanged || trackerChanged || repoDBChanged {
+		if err := d.startHTTPServerLocked(); err != nil {
+			return fmt.Errorf("failed to restart HTTP server: %w", err)
+		}
+		log.Printf("HTTP server restarted on %s", d.config.FacadeAddr)
 	}
 
 	return nil

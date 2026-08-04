@@ -28,8 +28,8 @@ commit as the work.
 - **Work log required.** `docs/logs/<author>-<feature>.md` for every feature,
   including your areas of uncertainty and whether you raised them.
 
-Current branch: `claude/branch-handoff-j5u55i`, ahead of `main` by the peer
-blacklist (§5.5) and main merged back into it.
+Current branch: `worktree-repo-db-reader`, ahead of `main` by the repository
+database reader (§5.2), the §4.3 merge, and the mounted facade (§5.4).
 
 ## 1. Document map — what to trust
 
@@ -44,7 +44,7 @@ blacklist (§5.5) and main merged back into it.
 | `docs/uc-02.puml`, `docs/uc-06.puml` | Current as of the HTTP peer wire. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
 | `docs/use-case-descriptions.md` | Current for UC-01, UC-02, UC-05, UC-06, UC-07. |
-| `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config. |
+| `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
 
 ### Stale — do not act on these without reading §3.1 first
 
@@ -66,21 +66,27 @@ Gate passes. What exists and works:
 - `internal/daemon/watcher.go` — cache watcher, wired, read-only. Skips symlinks
   and strips `~hash10` (§4.1).
 - `internal/config` — load / validate / generate-to-stdout. Two listen
-  addresses, `facade_addr` loopback-enforced. No writer, by design.
+  addresses, `facade_addr` loopback-enforced, plus `repo_db_dir`. No writer,
+  by design.
+- `internal/daemon/repodb.go` — `Repositories`, the repository database reader
+  (§5.2). Reads every catalogue under `repo_db_dir`, read-only, as an in-memory
+  snapshot. Wired into both the watcher and the facade.
 - `internal/daemon/facade.go` — the mirror facade handler. Path rule handles
   `All/Hashed/` and `~hash10`; spools through `temp_dir`; skips and marks
-  blacklisted peers via `peer.FetchFirst`. **Not mounted.**
+  blacklisted peers via `peer.FetchFirst`. **Mounted on `facade_addr`.**
 - `internal/peer` + `internal/peerwire` — fetch and seed over the interim binary
   framing. **Not mounted**, and being replaced (§3.2).
 - `internal/peer/blacklist.go` — the local peer blacklist (§5.5). In-memory, no
   expiry, not persisted; one list per `Facade`.
 
-What does not exist at all: a repository-database reader, and any wiring that
-puts the facade or the seed server on a port.
+What does not exist at all: any wiring that puts the **seed server** on a port
+(the facade half of §5.4 is done; the peer half waits on §5.3).
 
-**The daemon still does nothing useful against a real FreeBSD host**, but for
-one reason now rather than two: there is no repo DB reader (§5.2), so `Hashes`
-is `nil` and the facade 404s everything. The §4.1 path bugs are fixed.
+**The daemon should now do something useful against a real FreeBSD host, and
+nobody has checked.** The facade is mounted, the catalogue is read, and the
+watcher size-checks against it. What has never been exercised is pkg itself —
+see §7.1, which is now testable for the first time and is the single most
+valuable thing left.
 
 ## 3. Decided by the owner — implement, do not re-litigate
 
@@ -195,18 +201,78 @@ or strictly to what pkg 2.7.5 demonstrably does — was answered by ratifying th
 rules as proposed: they follow what was measured. Widening them later is cheap;
 just do not do it on speculation.
 
-### 4.2 Serving-side concurrency
+### 4.2 Serving-side concurrency — **DECIDED: adopt a limit. Implement with §5.3.**
 
-Nothing specifies how many simultaneous seeds a daemon accepts. Constant-memory
-serving makes this far less dangerous than it was, but sockets and file handles
-are still finite. No limit was invented. Ask before adding one.
+The owner states hostile peers are expected. That settles it, and it reverses
+the recommendation I first gave, so the reasoning is worth keeping.
 
-### 4.3 Whether `PackageHashes` and `RepositoryDatabase` merge
+The argument against a limit is real: the peer spec mandates an unbounded body
+transfer and AGENTS.md forbids stall detectors, so N slow peers hold all N slots
+with nothing able to reclaim them — a lockout that does not exist without the
+limit. What that argument misses is **blast radius**. The fd budget is
+per-process. With no limit an attacker exhausting descriptors does not just stop
+seeding: it breaks the facade's outbound fetches and the tracker keep-alive too,
+so this daemon stops installing packages and drops out of the swarm. With a
+limit the damage is confined to seeding. Under a hostile model the limit
+confines, so take it.
 
-Two interfaces, two views of the same repo DB row. The peer wire spec depends on
-hash and size always arriving together, which strengthens the case for one
-interface returning both. Not decided. Recorded in the peer spec's *Deliberately
-unspecified* table. Nothing is blocked on it, but §5.2 is the natural moment.
+**Mechanism: a non-blocking semaphore in the handler, `503` when full.** Not a
+listener-level limit — that queues excess connections invisibly until the
+requester's 5s dial timeout fires, so exhaustion stalls the swarm instead of one
+peer. A `503` is legible in both peers' logs and the requester already treats any
+non-200 as "try next peer", so load spills to another holder with no requester
+change. Two ways to get it wrong: `503` must **not** trigger the UC-06 §5b
+re-announce (that attaches to `404` — we do still hold the package), and do not
+send `Retry-After`.
+
+**Default `0` = unlimited**, configurable. AGENTS.md asks for a real observed
+problem before a control of this family; the hostile-peer expectation justifies
+the mechanism, not a specific number nobody has measured.
+
+Implement **with §5.3, not before**: there is no `503` on the `peerwire`
+framing, which that work deletes.
+
+**Still open — needs a ruling.** A *global* limit still lets one hostile IP hold
+every slot, because nothing reclaims them. A **per-remote-IP cap** is what
+actually defends against that, and it is in no spec, so it was not built. Raised
+with the owner; unanswered.
+
+Note before tuning anything: concurrency is not today's binding constraint. The
+current seeder is byte-slice based and copies the payload twice, so one request
+for the 2.83 GiB package OOMs a 1 GiB host whatever the limit is. §5.3 is the
+fix.
+
+### 4.3 Whether `PackageHashes` and `RepositoryDatabase` merge — **DECIDED AND DONE**
+
+They compose rather than collapse. `Repository` (in `repository.go`) embeds both
+narrow interfaces; the facade holds the composite, the watcher keeps taking the
+size-only `RepositoryDatabase`.
+
+The reason it is not one struct-returning `Lookup`: that would protect the peer
+spec's "hash and size arrive together" invariant at the cost of a different
+guarantee. `SanityFilter`'s signature currently *proves* the announce path
+cannot hash, because it can only ask for a size. A struct with a `Hash` field
+the watcher is trusted to ignore trades a type-level guarantee for a comment.
+Composing keeps both, and `watcher.go` did not change at all.
+
+Decided alongside it: the reader is a **snapshot**, not a live query — neither
+half returns an `error`, and that is only honest if a lookup cannot fail.
+Measured 38,074 packages in **6.3 MB**. And repository identity is **hidden**:
+no consumer has a use for it, and `name-version` was measured collision-free
+across both repositories.
+
+**Two riders are UNRATIFIED and were flagged, not answered:**
+
+1. **Cross-repository collisions** resolve to the first in sorted path order,
+   deterministically, with the count logged. Measured zero collisions. The
+   alternatives were refuse-to-start and accept-and-log. If the wrong row ever
+   won, verification fails and the peer is blacklisted — never corrupt bytes to
+   pkg.
+2. **Malformed rows are dropped** (`cksum` not 64 lowercase hex, or `pkgsize`
+   not positive). This edges toward the defensiveness §4.1 warned against, and
+   was done anyway because the failure is asymmetric: a malformed expected hash
+   cannot match any bytes, so the fetch path would blacklist an *honest* peer
+   for our own bad data. None of the 38,074 real rows was dropped.
 
 ## 5. Unblocked work, in order
 
@@ -215,12 +281,25 @@ All three acceptance criteria met: a non-loopback `facade_addr` refuses to
 start with a message naming the field, `-generate-config` still touches no
 filesystem, and `temp_dir` has a real consumer (with the caveat in §3.1).
 
-### 5.2 Repository database reader — **the biggest unblocked win, and now the only thing between the daemon and a real end-to-end fetch**
+### 5.2 Repository database reader — **DONE**
 
-The facade answers `404` to every request because `Hashes` is `nil`, and
-`SanityFilter` cannot check sizes. Both interfaces exist and neither has an
-implementation. The schema is fully known — this was established over SSH and is
-no longer guesswork:
+`internal/daemon/repodb.go`. Work log: `docs/logs/claude-repo-db-reader.md`.
+Driver: `modernc.org/sqlite` (pure Go, so the gate needs no C toolchain and
+cross-compiling to FreeBSD stays a `GOOS` setting). Opened `mode=ro` plus
+`query_only`, so the read-only constraint on pkg's signed catalogue is enforced
+by the driver rather than by our discipline.
+
+**It reads a directory, not a file.** The reference host has *two* repositories
+— `FreeBSD-ports` (37,835 rows) and `FreeBSD-ports-kmods` (239) — and every
+document before this one said "the repository database", singular. New config
+key `repo_db_dir`, default `/var/db/pkg/repos`.
+
+**Still open:** nothing triggers `Reload()`. `pkg update` rewrites these files,
+so a long-running daemon goes stale and starts answering 404 for packages added
+since startup. `Reload()` exists and is tested; wiring a trigger (a watch on
+`repo_db_dir`, or a periodic reload) is follow-up.
+
+The schema, for reference:
 
 ```sql
 -- /var/db/pkg/repos/FreeBSD-ports/db, table "packages"
@@ -238,10 +317,11 @@ name TEXT, version TEXT, pkgsize INTEGER, cksum TEXT, path TEXT, ...
 - The `meta` table gives `{"version":2,"packing_format":"tzst",…}`, which
   confirms the `.pkg` extension the watcher assumes and closes its TODO.
 
-Open it **read-only**. It is pkg's file and the hard constraints forbid writing
-to it. Acceptance: the facade serves a real package end to end on the FreeBSD
-host. §4.1 is no longer a precondition — it is done — so this plus §5.4 is the
-whole remaining distance to that.
+Verified against the real catalogues, not just fixtures: `indexinfo-0.3.1_1`
+resolves to hash `ae9dce33aa72…` and size **5905**. The `~ae9dce33aa` suffix
+measured in §4.1(a) is the first ten characters of that hash, and 5905 is
+exactly the symlink target size measured in §4.1(b) — three independent
+measurements from different sessions agreeing.
 
 The `meta` table finding has been applied: the watcher's `.txz`-vs-`.pkg` TODO
 is closed and `packageFileExtension` now records the measurement rather than an
@@ -257,14 +337,23 @@ Work to the peer spec's migration table and definition of done. This deletes
 `internal/peerwire` and rewrites `peer.Server`, `FetchFromPeer`, `PackageSource`,
 `cmd/demo` and both peer test files.
 
-### 5.4 Mount the facade and the seed server
-**Now blocked on §5.2 only.** §5.1 delivered the addresses, so `facade_addr`
-and `serving_addr` both exist and the loopback rule is enforced; what remains
-is `Facade.Check` refusing to start without a repository database. The `TODO`
-in `startHTTPServerLocked` says as much. Facade on `facade_addr`, seed server
-on `serving_addr`. Remember to pass `config.TempDir` into `Facade.TempDir` when
-you wire it — nothing constructs a `Facade` today, so the field is set by no
-caller yet.
+### 5.4 Mount the facade and the seed server — **facade half DONE**
+
+The facade is mounted at the root of `facade_addr`, with `config.TempDir`
+passed in. Startup order is now catalogue → discovery → listener, because the
+facade needs both; failing to read the catalogue is fatal to startup, matching
+`Facade.Check`.
+
+**The seed server half remains** and belongs to §5.3: `peer.Server` still speaks
+the `peerwire` framing, not HTTP, so there is nothing worth putting on
+`serving_addr` until that migration lands.
+
+Trap for whoever touches this: a nil `*Repositories` assigned into an interface
+field is a **non-nil interface holding a nil pointer**, so every `== nil` check
+downstream passes and the first call panics. It silently defeated `Facade.Check`
+— the daemon listened, then would have panicked on the first package request.
+Both wiring sites go through `Daemon.repository()` for this reason, and
+`TestStartHTTPServerRefusesWithoutARepositoryDatabase` is the regression test.
 
 ### 5.5 Local peer blacklist — **done**
 Landed via `claude/branch-handoff-j5u55i` (`baa515a`), merged into the §5.1/§4.1
@@ -325,10 +414,15 @@ Everything here needs the FreeBSD host. The owner has granted SSH access
    `/var/cache/pkg`; the `All/Hashed/` path in §4.1(a) came from a
    `pkg fetch -o` probe. Confirm the two are consistent and that nothing writes
    `All/Hashed/` into the cache itself.
-6. **Is `cksum` ever not sha256-hex?** One repository, one ABI, 37,835 rows, all
-   64-hex. `pkg_format_version` and `manifestdigest` exist in the schema and
-   have not been investigated. Either confirm on a second repo/ABI or record the
-   residual risk explicitly.
+6. **Is `cksum` ever not sha256-hex?** ~~One repository, one ABI.~~ **Largely
+   settled:** checked across **both** repositories on the host — 38,074 rows,
+   **zero** that are not 64 lowercase hex. The schema also declares
+   `cksum TEXT NOT NULL` and `pkgsize INTEGER NOT NULL`, so the two facts are
+   guaranteed together by the database rather than by convention. Residual risk
+   is now one *host* rather than one repository; `pkg_format_version` is NULL in
+   every row and `manifestdigest` remains uninvestigated. The reader drops any
+   row that fails the format check, so a violation degrades to "that package is
+   not served" rather than to a bad verification.
 7. **Where does the tracker run for a real trial?** Deployment is unspecified.
    The daemon defaults to `http://127.0.0.1:8080`, which is fine for tests and
    useless for two machines. Also worth confirming the accepted "one daemon per

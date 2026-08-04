@@ -24,11 +24,25 @@ type fakeLister struct {
 
 func (f fakeLister) Peers(string) ([]string, error) { return f.addrs, f.err }
 
-type fakeHashes map[string]string
+// fakeRepo is a Repository: both views of one repository-database row, keyed by
+// name-version. A row carries a hash and a size because the real database does
+// -- both columns are NOT NULL -- so a fake that could supply one without the
+// other would let a test pass in a state production cannot reach.
+type fakeRepo map[string]fakeRow
 
-func (f fakeHashes) ExpectedHash(nameVersion string) (string, bool) {
-	h, ok := f[nameVersion]
-	return h, ok
+type fakeRow struct {
+	hash string
+	size int64
+}
+
+func (f fakeRepo) ExpectedHash(nameVersion string) (string, bool) {
+	r, ok := f[nameVersion]
+	return r.hash, ok
+}
+
+func (f fakeRepo) ExpectedFileSizeBytes(nameVersion string) (int64, bool) {
+	r, ok := f[nameVersion]
+	return r.size, ok
 }
 
 type fakeCache map[string][]byte
@@ -151,76 +165,76 @@ func TestFacadeStatusCodes(t *testing.T) {
 	// A peer that is not listening at all: connection failure (UC-02 8e).
 	deadPeer := "127.0.0.1:1"
 
-	hashes := fakeHashes{pkgName: sha256Hex(content)}
+	repo := fakeRepo{pkgName: {hash: sha256Hex(content), size: int64(len(content))}}
 
 	tests := []struct {
 		name     string
 		method   string
 		path     string
 		lister   peer.PeerLister
-		hashes   PackageHashes
+		repo     Repository
 		wantCode int
 	}{
 		{
 			name: "verified download", method: http.MethodGet, path: pkgPath,
-			lister: fakeLister{addrs: []string{goodPeer}}, hashes: hashes,
+			lister: fakeLister{addrs: []string{goodPeer}}, repo: repo,
 			wantCode: http.StatusOK,
 		},
 		{
 			name: "falls through to a later peer", method: http.MethodGet, path: pkgPath,
-			lister: fakeLister{addrs: []string{deadPeer, corruptPeer, goodPeer}}, hashes: hashes,
+			lister: fakeLister{addrs: []string{deadPeer, corruptPeer, goodPeer}}, repo: repo,
 			wantCode: http.StatusOK,
 		},
 		{
 			name: "metadata path", method: http.MethodGet, path: "/stable/FreeBSD:15:amd64/latest/meta.conf",
-			lister: fakeLister{addrs: []string{goodPeer}}, hashes: hashes,
+			lister: fakeLister{addrs: []string{goodPeer}}, repo: repo,
 			wantCode: http.StatusNotFound,
 		},
 		{
 			name: "malformed name-version", method: http.MethodGet, path: "/latest/All/nginx.pkg",
-			lister: fakeLister{addrs: []string{goodPeer}}, hashes: hashes,
+			lister: fakeLister{addrs: []string{goodPeer}}, repo: repo,
 			wantCode: http.StatusBadRequest,
 		},
 		{
 			name: "not in repository database", method: http.MethodGet, path: pkgPath,
-			lister: fakeLister{addrs: []string{goodPeer}}, hashes: fakeHashes{},
+			lister: fakeLister{addrs: []string{goodPeer}}, repo: fakeRepo{},
 			wantCode: http.StatusNotFound,
 		},
 		{
 			name: "no repository database wired up", method: http.MethodGet, path: pkgPath,
-			lister: fakeLister{addrs: []string{goodPeer}}, hashes: nil,
+			lister: fakeLister{addrs: []string{goodPeer}}, repo: nil,
 			wantCode: http.StatusNotFound,
 		},
 		{
 			name: "tracker returned no peers", method: http.MethodGet, path: pkgPath,
-			lister: fakeLister{addrs: nil}, hashes: hashes,
+			lister: fakeLister{addrs: nil}, repo: repo,
 			wantCode: http.StatusNotFound,
 		},
 		{
 			name: "tracker unreachable", method: http.MethodGet, path: pkgPath,
-			lister: fakeLister{err: errors.New("dial tcp: connection refused")}, hashes: hashes,
+			lister: fakeLister{err: errors.New("dial tcp: connection refused")}, repo: repo,
 			wantCode: http.StatusBadGateway,
 		},
 		{
 			name: "all peers exhausted", method: http.MethodGet, path: pkgPath,
-			lister: fakeLister{addrs: []string{deadPeer, corruptPeer}}, hashes: hashes,
+			lister: fakeLister{addrs: []string{deadPeer, corruptPeer}}, repo: repo,
 			wantCode: http.StatusBadGateway,
 		},
 		{
 			name: "HEAD is not served", method: http.MethodHead, path: pkgPath,
-			lister: fakeLister{addrs: []string{goodPeer}}, hashes: hashes,
+			lister: fakeLister{addrs: []string{goodPeer}}, repo: repo,
 			wantCode: http.StatusMethodNotAllowed,
 		},
 		{
 			name: "POST is not served", method: http.MethodPost, path: pkgPath,
-			lister: fakeLister{addrs: []string{goodPeer}}, hashes: hashes,
+			lister: fakeLister{addrs: []string{goodPeer}}, repo: repo,
 			wantCode: http.StatusMethodNotAllowed,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := &Facade{Peers: tc.lister, Hashes: tc.hashes}
+			f := &Facade{Peers: tc.lister, Repo: tc.repo}
 			rec := httptest.NewRecorder()
 			f.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
 
@@ -249,8 +263,8 @@ func TestFacadeNeverServesUnverifiedBytes(t *testing.T) {
 	corruptPeer := startPeer(t, fakeCache{pkgName: []byte("tampered")})
 
 	f := &Facade{
-		Peers:  fakeLister{addrs: []string{corruptPeer}},
-		Hashes: fakeHashes{pkgName: sha256Hex(content)},
+		Peers: fakeLister{addrs: []string{corruptPeer}},
+		Repo:  fakeRepo{pkgName: {hash: sha256Hex(content), size: int64(len(content))}},
 	}
 	rec := httptest.NewRecorder()
 	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/latest/All/nginx-1.24.0_2.pkg", nil))
@@ -274,8 +288,8 @@ func TestFacadeBlacklistOutlivesOneRequest(t *testing.T) {
 	goodPeer := startPeer(t, fakeCache{pkgName: content})
 
 	f := &Facade{
-		Peers:  fakeLister{addrs: []string{corruptPeer, goodPeer}},
-		Hashes: fakeHashes{pkgName: sha256Hex(content)},
+		Peers: fakeLister{addrs: []string{corruptPeer, goodPeer}},
+		Repo:  fakeRepo{pkgName: {hash: sha256Hex(content), size: int64(len(content))}},
 	}
 
 	rec := httptest.NewRecorder()
@@ -310,8 +324,8 @@ func TestFacadeOverRealHTTP(t *testing.T) {
 	content := []byte("package bytes over the wire")
 
 	f := &Facade{
-		Peers:  fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
-		Hashes: fakeHashes{pkgName: sha256Hex(content)},
+		Peers: fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
+		Repo:  fakeRepo{pkgName: {hash: sha256Hex(content), size: int64(len(content))}},
 	}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -357,7 +371,7 @@ func TestFacadeSpoolsThroughTempDirAndCleansUp(t *testing.T) {
 
 	f := &Facade{
 		Peers:   fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
-		Hashes:  fakeHashes{pkgName: sha256Hex(content)},
+		Repo:    fakeRepo{pkgName: {hash: sha256Hex(content), size: int64(len(content))}},
 		TempDir: tempDir,
 	}
 	rec := httptest.NewRecorder()
@@ -392,7 +406,7 @@ func TestFacadeUnwritableTempDirIs500(t *testing.T) {
 
 	f := &Facade{
 		Peers:   fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
-		Hashes:  fakeHashes{pkgName: sha256Hex(content)},
+		Repo:    fakeRepo{pkgName: {hash: sha256Hex(content), size: int64(len(content))}},
 		TempDir: filepath.Join(t.TempDir(), "does-not-exist"),
 	}
 	rec := httptest.NewRecorder()
@@ -411,7 +425,7 @@ func TestFacadeCheck(t *testing.T) {
 	if err := f.Check(); !errors.Is(err, ErrNoRepositoryDatabase) {
 		t.Errorf("Check() without hashes = %v, want ErrNoRepositoryDatabase", err)
 	}
-	f.Hashes = fakeHashes{}
+	f.Repo = fakeRepo{}
 	if err := f.Check(); err != nil {
 		t.Errorf("Check() on a wired facade = %v, want nil", err)
 	}

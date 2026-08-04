@@ -24,6 +24,7 @@ existing config is well defined.
 -serving-addr  where peers reach us, host:port    (default 0.0.0.0:9002)
 -temp-dir      scratch space for downloads        (default the OS temp directory)
 -cache         pkg's package cache, read-only     (default /var/cache/pkg)
+-repo-db       pkg's repository databases, r/o    (default /var/db/pkg/repos)
 -config        which config file to run from      (default ~/.config/jmj/config.json)
 ```
 
@@ -43,6 +44,15 @@ The daemon listens on two ports, and they are not interchangeable:
 while it is being verified and deleted as soon as it has been served — it is not
 a cache and nothing in it is meant to survive. The default is the OS temp
 directory for exactly that reason.
+
+`repo_db_dir` is where pkg keeps its repository catalogues — one subdirectory
+per configured repository, each holding a SQLite file named `db`. The daemon
+reads every one of them to learn each package's expected SHA-256 and exact size:
+that is the only source of truth for verification, since peers are not trusted
+and the tracker never checks content. It is opened strictly read-only. Like
+`cache_dir` it must already exist and is never created, and a daemon that cannot
+read it will not start — without a catalogue it could verify nothing and would
+answer 404 to every request.
 
 Configs written for older builds are rejected with a message naming the key:
 `listen_addr` became `facade_addr` plus `serving_addr`, and `buffer_dir` became
@@ -64,5 +74,6 @@ something to announce. `SIGHUP` reloads the config without a restart.
 
 At startup — not at generation time — the daemon checks the config against the
 machine it is on: `temp_dir` is created if absent and probed for writability,
-and `cache_dir` must already exist, because the pkg cache is read-only to the
-daemon and it will never create it.
+and `cache_dir` and `repo_db_dir` must already exist, because pkg's cache and
+its repository catalogues are read-only to the daemon and it will never create
+them.
