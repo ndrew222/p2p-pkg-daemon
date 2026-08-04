@@ -3,11 +3,13 @@ package daemon
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,5 +162,112 @@ func writePackage(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("package bytes"), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// freePort returns a port nothing is listening on. The facade needs a real
+// address because startHTTPServerLocked calls ListenAndServe, and a fixed port
+// would make the test collide with whatever else is on the machine.
+func freePort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+// The facade is mounted, not merely constructed. Until the repository database
+// reader landed the daemon served an empty mux on facade_addr, so pkg got Go's
+// stock "404 page not found" for every request and no package could ever be
+// fetched through it.
+//
+// A metadata path is the probe: it is the one request the facade answers
+// without contacting a peer, and its body is distinguishable from the empty
+// mux's, which is what proves the handler is ours.
+func TestFacadeIsMountedOnFacadeAddr(t *testing.T) {
+	cacheDir := t.TempDir()
+	repoDir := t.TempDir()
+	writeRepoDB(t, repoDir, "FreeBSD-ports", []fixtureRow{
+		{"nginx", "1.24.0_2", 1234, hash64('a')},
+	})
+
+	tracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ack"}`))
+	}))
+	t.Cleanup(tracker.Close)
+
+	facadeAddr := freePort(t)
+	d := &Daemon{
+		config: &config.DaemonConfig{
+			TrackerURL:  tracker.URL,
+			FacadeAddr:  facadeAddr,
+			ServingAddr: "0.0.0.0:9002",
+			CacheDir:    cacheDir,
+			RepoDBDir:   repoDir,
+			TempDir:     t.TempDir(),
+		},
+		running: true,
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+
+	d.mu.Lock()
+	if err := d.openRepositoriesLocked(); err != nil {
+		d.mu.Unlock()
+		t.Fatalf("openRepositoriesLocked() = %v", err)
+	}
+	if err := d.startDiscoveryLocked(); err != nil {
+		d.mu.Unlock()
+		t.Fatalf("startDiscoveryLocked() = %v", err)
+	}
+	if err := d.startHTTPServerLocked(); err != nil {
+		d.mu.Unlock()
+		t.Fatalf("startHTTPServerLocked() = %v", err)
+	}
+	d.mu.Unlock()
+
+	url := "http://" + facadeAddr + "/stable/FreeBSD:15:amd64/latest/meta.conf"
+	var resp *http.Response
+	var err error
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err = http.Get(url)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "this mirror serves package files only") {
+		t.Errorf("body = %q; want the facade's metadata refusal, not the empty mux's 404", body)
+	}
+}
+
+// Facade.Check is what refuses to serve without a catalogue, and the daemon
+// must surface that rather than listening anyway.
+func TestStartHTTPServerRefusesWithoutARepositoryDatabase(t *testing.T) {
+	d := &Daemon{
+		config: &config.DaemonConfig{
+			FacadeAddr: freePort(t),
+			TempDir:    t.TempDir(),
+		},
+	}
+	d.mu.Lock()
+	err := d.startHTTPServerLocked()
+	d.mu.Unlock()
+	if err == nil {
+		t.Fatal("startHTTPServerLocked() without a repository database = nil, want an error")
 	}
 }
