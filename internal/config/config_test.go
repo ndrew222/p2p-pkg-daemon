@@ -18,6 +18,7 @@ func validConfig(t *testing.T) *DaemonConfig {
 		ServingAddr: "0.0.0.0:9002",
 		TempDir:     filepath.Join(t.TempDir(), "scratch"),
 		CacheDir:    t.TempDir(),
+		RepoDBDir:   t.TempDir(),
 	}
 }
 
@@ -164,6 +165,33 @@ func TestValidateRejectsCacheDirThatIsNotADirectory(t *testing.T) {
 	}
 }
 
+// The repository databases are pkg's signed catalogues. The same read-only rule
+// as the cache applies, and harder: creating this directory would produce a
+// daemon that verifies nothing and 404s every package request.
+func TestValidateDoesNotCreateRepoDBDir(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.RepoDBDir = filepath.Join(t.TempDir(), "no-such-repos")
+
+	if err := Validate(cfg); err == nil {
+		t.Fatal("Validate() with a missing repo_db_dir = nil, want an error")
+	}
+	if _, err := os.Stat(cfg.RepoDBDir); !os.IsNotExist(err) {
+		t.Errorf("Validate() created %q; the repository database is read-only", cfg.RepoDBDir)
+	}
+}
+
+func TestValidateRejectsRepoDBDirThatIsNotADirectory(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.RepoDBDir = filepath.Join(t.TempDir(), "regular-file")
+	if err := os.WriteFile(cfg.RepoDBDir, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Validate(cfg); err == nil {
+		t.Error("Validate() with a file as repo_db_dir = nil, want an error")
+	}
+}
+
 // -generate-config writes a config for whatever host will run it. The default
 // cache_dir is a FreeBSD path, so requiring it to exist here would break the
 // generator on every machine anyone develops on.
@@ -193,6 +221,13 @@ func TestValidateFieldsRequiresPathsToBeSet(t *testing.T) {
 		cfg.TempDir = ""
 		if err := ValidateFields(cfg); err == nil {
 			t.Error("empty temp_dir = nil, want an error")
+		}
+	})
+	t.Run("repo_db_dir", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.RepoDBDir = ""
+		if err := ValidateFields(cfg); err == nil {
+			t.Error("empty repo_db_dir = nil, want an error")
 		}
 	})
 }
