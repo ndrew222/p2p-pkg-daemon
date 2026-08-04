@@ -95,6 +95,38 @@ func TestPackageRequest(t *testing.T) {
 		// Traversal must not smuggle All into the parent position.
 		{"traversal", "/All/../etc/passwd", "", false},
 		{"traversal to All", "/foo/../All/nginx-1.24.0_2.pkg", "nginx-1.24.0_2", true},
+
+		// What pkg 2.7.5 actually requests, measured on FreeBSD
+		// 15.1-RELEASE-p1. The Hashed/ level and the ~hash10 suffix are
+		// both present, and the earlier rule 404'd every one of these.
+		{
+			"pkg 2.7.5 hashed request",
+			"/stable/FreeBSD:15:amd64/latest/All/Hashed/indexinfo-0.3.1_1~ae9dce33aa.pkg",
+			"indexinfo-0.3.1_1", true,
+		},
+		{"hashed without suffix", "/latest/All/Hashed/curl-8.6.0.pkg", "curl-8.6.0", true},
+		{"suffix without Hashed", "/latest/All/curl-8.6.0~0123456789.pkg", "curl-8.6.0", true},
+		{
+			"hashed hyphenated name",
+			"/All/Hashed/py311-setuptools-63.1.0~abcdef0123.pkg",
+			"py311-setuptools-63.1.0", true,
+		},
+
+		// The suffix rule is exactly 10 lowercase hex after a tilde.
+		// Anything else is part of the version, not a checksum, and must
+		// not be silently eaten.
+		{"suffix too short", "/All/curl-8.6.0~abc.pkg", "curl-8.6.0~abc", true},
+		{"suffix not hex", "/All/curl-8.6.0~zzzzzzzzzz.pkg", "curl-8.6.0~zzzzzzzzzz", true},
+		{"suffix uppercase", "/All/curl-8.6.0~ABCDEF0123.pkg", "curl-8.6.0~ABCDEF0123", true},
+
+		// Hashed is tolerated directly under All and nowhere else.
+		{"Hashed without All", "/latest/Hashed/curl-8.6.0.pkg", "", false},
+		{"Hashed too deep", "/All/Hashed/more/curl-8.6.0.pkg", "", false},
+		{"Hashed directory itself", "/All/Hashed/", "", false},
+
+		// A repo directory that happens to be named All does not displace
+		// the real one: the last All wins.
+		{"repo named All", "/All/latest/All/curl-8.6.0.pkg", "curl-8.6.0", true},
 	}
 
 	for _, tc := range tests {
