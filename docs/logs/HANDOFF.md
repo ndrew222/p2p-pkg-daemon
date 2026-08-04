@@ -32,11 +32,11 @@ Current branch: `main`. The repository database reader (§5.2), the §4.3 merge
 and the mounted facade (§5.4) all landed there via PR #17 (`461e687`); the
 `worktree-repo-db-reader` branch this file used to name is merged and gone.
 
-**Read `docs/logs/claude-verification-rulings.md` before starting.** The owner
-has since ruled on §4.3's two riders and §5.5's three leftovers, and on the
-unreachable size-mismatch branch. That file is a *plan*, not a work log — the
-rulings are recorded but nothing below has been edited to match them yet, so
-§4.3 and §5.5 still read as open. Executing it is the next commit.
+The owner's rulings on §4.3's two riders, §5.5's three leftovers and the
+unreachable size-mismatch branch have been **executed**; §4.3, §5.5 and UC-02
+below read as decided. `docs/logs/claude-verification-rulings.md` is now an
+ordinary work log of that change. One thing it surfaced is new and unpleasant:
+the daemon has no seed implementation at all — see §6.
 
 ## 1. Document map — what to trust
 
@@ -268,18 +268,27 @@ Measured 38,074 packages in **6.3 MB**. And repository identity is **hidden**:
 no consumer has a use for it, and `name-version` was measured collision-free
 across both repositories.
 
-**Two riders are UNRATIFIED and were flagged, not answered:**
+**Both riders are now RATIFIED and implemented:**
 
 1. **Cross-repository collisions** resolve to the first in sorted path order,
-   deterministically, with the count logged. Measured zero collisions. The
-   alternatives were refuse-to-start and accept-and-log. If the wrong row ever
-   won, verification fails and the peer is blacklisted — never corrupt bytes to
-   pkg.
+   deterministically. Measured zero collisions. The alternatives were
+   refuse-to-start and accept-and-log; first-wins won because the downside is
+   bounded — pkg re-verifies our bytes against the row *it* picked (UC-02 step
+   10), so a wrong pick is a failed install, never a corrupt one, whereas
+   refusing to start lets one misconfigured third-party repository take the
+   daemon down. The choice cannot be delegated: the facade needs an expected
+   hash before it fetches, and the swarm has no repository dimension at all.
+   The ruling added naming the colliding name-versions in the log, not just
+   counting them — the one thing pkg's re-verification does not cover is that a
+   wrong row makes us blacklist an *honest* peer for our own bad data.
 2. **Malformed rows are dropped** (`cksum` not 64 lowercase hex, or `pkgsize`
    not positive). This edges toward the defensiveness §4.1 warned against, and
-   was done anyway because the failure is asymmetric: a malformed expected hash
-   cannot match any bytes, so the fetch path would blacklist an *honest* peer
-   for our own bad data. None of the 38,074 real rows was dropped.
+   was ratified anyway because the failure is asymmetric: a malformed expected
+   hash cannot match any bytes, so the fetch path would blacklist an *honest*
+   peer for our own bad data. None of the 38,074 real rows was dropped. The two
+   causes are now counted and logged separately, with the dropped
+   name-versions named; the old warning reported every drop as a bad `cksum`
+   even when `pkgsize` was the problem.
 
 ## 5. Unblocked work, in order
 
@@ -344,6 +353,13 @@ Work to the peer spec's migration table and definition of done. This deletes
 `internal/peerwire` and rewrites `peer.Server`, `FetchFromPeer`, `PackageSource`,
 `cmd/demo` and both peer test files.
 
+**It is bigger than a wire migration.** It must also *build the cache-backed
+seeder that has never existed* (§6) and carry the §4.2 `503` semaphore, and it
+is what makes the size bound in §5.5 real code — `io.LimitReader(body,
+expectedSize+1)` plus the `Content-Length` check, neither of which exists while
+the fetch path returns a `[]byte`. Keep `peerwire.MaxPayload` until this lands
+or the fetch path is left with no bound at all.
+
 ### 5.4 Mount the facade and the seed server — **facade half DONE**
 
 The facade is mounted at the root of `facade_addr`, with `config.TempDir`
@@ -369,16 +385,23 @@ work rather than rebased onto it. `internal/peer/blacklist.go` plus
 keeping two copies of the peer loop. Local only, never reported to the tracker.
 Work log: `docs/logs/claude-peer-blacklist.md`.
 
-Left deliberately undecided, and still open if the owner wants them: entries
-have **no expiry** and are **not persisted** across restarts, and a peer is
-blacklisted **for everything**, not per package. Each was unasked, so the
-literal reading won.
+The three positions once left undecided are **ratified as the code has them**:
+entries have **no expiry**, are **not persisted**, and the key is the peer
+address, so a peer that serves corrupt bytes is distrusted **for everything**,
+not per package — corrupt bytes are evidence about the peer, not about the
+file. Culling is therefore by restart, which is a complete cull; no `Unblock`
+exists and none is planned, because an admin surface is in no spec. What the
+ruling required was that the log show what a restart would clear, so
+`FetchFirst` now reports the standing list alongside each new entry.
 
-One wrinkle worth a second look: UC-02's refinement says **a size or hash
-mismatch blacklists**, but the fetch path only ever raises `ErrHashMismatch` —
-there is no separate size check to trip, so "size" is currently unreachable
-rather than implemented. A `404` correctly does not blacklist: it means the peer
-no longer holds the file, not that it lied.
+The size branch is resolved by ruling, not left dangling: **only a hash
+mismatch blacklists.** The expected size stays as a *transfer bound* — a
+`Content-Length` disagreement or an overrun abandons the peer and moves to the
+next holder — but it is no longer a verdict, because a body of the wrong length
+fails the hash anyway if read to completion. UC-02 steps 9, 9c and 11c and the
+peer spec's size-bound section now state one rule between them. A `404`
+continues not to blacklist: it means the peer no longer holds the file, not
+that it lied.
 
 ### 5.6 The other §4.1 half nobody has checked
 The facade and the watcher now agree on `~hash10`, but §7.5 below — whether the
@@ -395,6 +418,15 @@ observations; nothing proves the observations are consistent with each other.
   alongside it; the helper now closes its listener via `t.Cleanup`.
 - `cmd/demo` depends on `peerwire` and on `PackageSource.Get` returning
   `[]byte`. It must be rewritten in §5.3, not deleted.
+- **This daemon announces packages it cannot serve.** There is no production
+  `PackageSource` anywhere in the tree — the only implementors are two test
+  fakes and `cmd/demo`'s in-memory store, and `peer.Server` is constructed only
+  in the demo. Nothing reads the pkg cache for file *contents*; `watcher.go`
+  reads it for names alone. Meanwhile `daemon.go` announces
+  `config.ServingPort()` and the keep-alive announces the whole cache, so a
+  peer acting on our tracker entry gets connection-refused. A dial failure
+  correctly does not blacklist, so the cost is one wasted attempt per peer.
+  The fix belongs with §5.3.
 
 ## 7. Information we do not have — get it before deciding
 

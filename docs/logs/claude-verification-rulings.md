@@ -1,25 +1,18 @@
-# Verification rulings — plan, not yet implemented
+# Work log — the verification rulings, executed
 
-**Status: PLANNED. No code or document in this commit has been changed to match
-it.** This file records four owner rulings and the change they imply, so the
-next session can execute them without re-deriving the reasoning. Delete this
-banner and rewrite the file as an ordinary work log once the work lands.
-
-## Why this exists
-
-Four items were flagged to the owner in `HANDOFF.md` and left unanswered: the
-§4.3 riders on cross-repository collisions and malformed rows, and the §5.5
+Four items had been flagged to the owner in `HANDOFF.md` and left unanswered:
+the §4.3 riders on cross-repository collisions and malformed rows, and the §5.5
 leftovers on blacklist expiry, persistence and scope — plus the observation that
-UC-02's "a size or hash mismatch blacklists" is unreachable in code, because the
-fetch path only ever raises `ErrHashMismatch`. The owner has now ruled on all
-four.
+UC-02's "a size or hash mismatch blacklists" was unreachable in code, because
+the fetch path only ever raises `ErrHashMismatch`. The owner ruled on all four.
+This log records the rulings, the reasoning behind them, and what each one
+changed. A fifth thing surfaced while answering a question about what the "seed
+server" is; it is reported here and in `HANDOFF.md` §6, not fixed.
 
-A fifth thing surfaced while answering a question about what the "seed server"
-is, and is reported here rather than fixed. See the last section.
+Everything below was put to the owner as a question before being written down.
+None of it is an implementer's reasonable interpretation.
 
-## The rulings
-
-### 1. Verification blacklists on hash mismatch only
+## 1. Verification blacklists on hash mismatch only
 
 The expected size stays, but only as a **transfer bound**. It is no longer a
 verdict.
@@ -40,22 +33,23 @@ evidence the peer sent bytes that are wrong rather than bytes that are not the
 ones we asked for. A `404` continues not to blacklist — it means the peer no
 longer holds the file, not that it lied.
 
-`docs/peer-transfer-spec-v0.2.md` §"The size bound" already specifies exactly
-this mechanism (abandon on `Content-Length` mismatch before reading a byte; read
-through `io.LimitReader(body, expectedSize+1)`). It needs one sentence saying
-that abandoning is not blacklisting. The conflict is confined to UC-02.
+**Changed:** `docs/use-case-descriptions.md` step 9 (the two jobs stated apart),
+9c (a size disagreement routes past the blacklist step), 11c (the rule and its
+reasoning inline, because that is the cell a reader lands on) and the UC-02
+assumptions cell. One clarifying sentence in `docs/peer-transfer-spec-v0.2.md`
+§"The size bound", which already specified the mechanism — abandon on a
+`Content-Length` mismatch before reading a byte, read through
+`io.LimitReader(body, expectedSize+1)` — but not that abandoning is not
+blacklisting.
 
-**Changes:** `docs/use-case-descriptions.md` steps 9, 9c, 11c and the UC-02
-assumptions cell — size bounds, hash verifies, rationale stated inline at 11c
-because that is the cell a reader lands on. One clarifying sentence in
-`docs/peer-transfer-spec-v0.2.md`. No code: the read cap arrives with the
-streaming rewrite in §5.3, and `peerwire.MaxPayload` must stay until then or the
-fetch path is left with no bound at all.
+**No code changed**, deliberately. The read cap arrives with the streaming
+rewrite in §5.3, and `peerwire.MaxPayload` must stay until then or the fetch
+path is left with no bound at all.
 
-### 2. The blacklist is per-peer, unexpiring, unpersisted, culled by restart
+## 2. The blacklist is per-peer, unexpiring, unpersisted, culled by restart
 
 All three of §5.5's "left deliberately undecided" positions are ratified as the
-code already has them, and the third leg is now explicit: the key is the **peer
+code already had them, and the third leg is now explicit: the key is the **peer
 address**, so a peer that serves corrupt bytes is distrusted for *everything*.
 Corrupt bytes are evidence about the peer, not about one file.
 
@@ -64,21 +58,20 @@ complete cull. No `Unblock` exists and none is planned: something would have to
 call it, and an admin surface is in no spec — adding one would trip AGENTS.md
 ground rule 2.
 
-What the ruling does require is that the log show what a restart would clear.
-`internal/peer/download.go` already logs the address and the package on every
-`Block`; nothing ever reports the list as a whole, and `Blacklist.Addrs()` —
-written "for logging and tests" — has no caller.
+What the ruling required is that the log show what a restart would clear.
+`internal/peer/download.go` already logged the address and the package on every
+`Block`, but nothing ever reported the list as a whole, and `Blacklist.Addrs()`
+— written "for logging and tests" — had no caller at all.
 
-**Changes:** rewrite the UNSPECIFIED block in `internal/peer/blacklist.go` as a
-ratified decision covering all three legs plus the cull story. Extend the
-existing blacklist log line in `internal/peer/download.go` to report the
-resulting list size, reusing `Addrs()` rather than adding an accessor.
+**Changed:** the UNSPECIFIED block in `internal/peer/blacklist.go` is now a
+ratified decision covering all three legs and the cull story; `FetchFirst`
+reports the standing list, via `Addrs()`, alongside each new entry.
 
-### 3. Cross-repository collisions: first-wins, and name them
+## 3. Cross-repository collisions: first-wins, and name them
 
 Ratified as implemented — first repository in sorted path order wins,
 deterministically — with one addition: log **which** name-versions collided, not
-just how many. Cap the list with an "and N more" tail in case a misconfigured
+just how many, capped with an "and N more" tail in case a misconfigured
 third-party repository shadows ports wholesale.
 
 **Why this is not pkg's problem to solve**, since it is the first thing the next
@@ -104,40 +97,45 @@ belong in the log, and it is why first-wins beats refuse-to-start — the downsi
 is bounded and diagnosable, whereas refusing to start lets one misconfigured
 third-party repository take the daemon down.
 
-**Changes:** `internal/daemon/repodb.go` `Reload` — collect and log the
-colliding keys; delete the `UNRATIFIED` comment and replace it with the ratified
-rule and the reasoning above.
+**Changed:** `internal/daemon/repodb.go` `Reload` collects the colliding keys
+and logs them; the `UNRATIFIED` comment is replaced by the ratified rule and the
+reasoning above. The same stale note is gone from the collision test.
 
-### 4. Malformed rows are dropped with a warning
+## 4. Malformed rows are dropped with a warning
 
-Ratified. This already happens, and the owner notes it is clearly a non-issue in
-practice — none of the 38,074 real rows was dropped. But the warning is wrong in
-two ways worth correcting while the decision is being recorded.
+Ratified. This already happened, and the owner notes it is clearly a non-issue
+in practice — none of the 38,074 real rows was dropped. But the warning was
+wrong in two ways, corrected while the decision was being recorded.
 
-The counter is incremented by `!isHexSHA256(cksum) || pkgsize <= 0`, while the
-message reports only "malformed cksum", so a `pkgsize` problem would be
-diagnosed as a checksum problem. And the count is aggregate — no name-version of
-any dropped row is ever named.
+The counter was incremented by `!isHexSHA256(cksum) || pkgsize <= 0`, while the
+message reported only "malformed cksum", so a `pkgsize` problem was diagnosed as
+a checksum problem. And the count was aggregate — no name-version of any dropped
+row was ever named, so a drop could not be checked against the catalogue.
 
 The existing rationale comment stays: dropping is right because a malformed
 expected hash cannot match any bytes, so keeping the row would blacklist an
 honest peer for our own bad data. Failing to start would be worse.
 
-**Changes:** `internal/daemon/repodb.go` — split `loadRepositoryDatabase`'s
-single `skipped` return into its two causes and report them distinctly. The
-daemon logs via package-level `log.Printf` throughout and `repodb.go` already
-imports `log`, so no logger plumbing is needed.
+**Changed:** `internal/daemon/repodb.go` — `loadRepositoryDatabase`'s single
+`skipped` count is now a `skippedRows` carrying the name-versions under each
+cause, reported on separate log lines. A row failing both checks counts once,
+under the cksum, because that is the cause to act on first: no usable hash means
+no verification at all. `namesForLog` sorts for run-to-run stability and caps at
+ten names.
 
-## Also in scope
+## Also done
 
-- `internal/daemon/facade.go` says the facade is "Still NOT wired into
-  `Daemon.startHTTPServerLocked`". It is, and has been since §5.4. Correct it.
-- `HANDOFF.md`: mark §4.3's two riders and §5.5's three leftovers ratified,
-  carrying the reasoning above; rewrite §5.5's "one wrinkle worth a second look"
-  paragraph, since the unreachable size branch is now resolved by ruling rather
-  than left dangling.
+- `internal/daemon/facade.go` said the facade was "Still NOT wired into
+  `Daemon.startHTTPServerLocked`". It has been since §5.4. The comment now says
+  so, and says why that path does not call `ListenAndServe`: it needs its own
+  `*http.Server` to shut down on reconfiguration, so it runs `Check` itself and
+  serves the same handler.
+- `HANDOFF.md`: §4.3's two riders and §5.5's three leftovers marked ratified
+  with the reasoning above; §5.5's "one wrinkle worth a second look" paragraph
+  rewritten, since the unreachable size branch is resolved by ruling; the
+  seed-side gap added to §6 and §5.3's true size noted.
 
-Do **not** edit `docs/logs/elroy-uc1-config.md`. §1 says another author's work
+`docs/logs/elroy-uc1-config.md` was not touched: §1 says another author's work
 log is history.
 
 ## The seed-side gap — reported, not fixed
@@ -158,32 +156,32 @@ packages it cannot serve and any peer acting on that entry gets
 connection-refused. A dial failure correctly does not blacklist, so the cost is
 one wasted attempt per peer.
 
-This makes §5.3 larger than `HANDOFF.md` implies. It is not only a wire
+This makes §5.3 larger than `HANDOFF.md` implied. It is not only a wire
 migration: it must **build the cache-backed seeder that has never existed**.
-Recorded in §6 as a known defect rather than fixed here — the fix belongs with
-§5.3.
+Recorded in `HANDOFF.md` §6 as a known defect rather than fixed here — the fix
+belongs with §5.3.
 
-## Out of scope
+## Out of scope, and still so
 
 §5.3 and the cache-backed `PackageSource`; mounting the seed server; the §4.2
-per-remote-IP cap; wiring a `Reload()` trigger; and everything in §7 that needs
-the FreeBSD host.
+per-remote-IP cap; wiring a `Reload()` trigger; and everything in `HANDOFF.md`
+§7 that needs the FreeBSD host.
 
-## Verification when this is executed
+## Verification
 
 The gate — `go build ./... && go vet ./... && go test ./...` plus `gofmt` —
-must pass with no FreeBSD, no `pkg` and no second machine. Extend the existing
-malformed-row and collision fixtures in `internal/daemon/repodb_test.go` to
-assert the two skip causes are counted separately; fixtures only, no real
-catalogue. Confirm in `internal/peer` that `ErrHashMismatch` still blacklists
-and nothing else does. No new size-check test — the read cap lands with §5.3.
-Finally, read UC-02 steps 9, 9c and 11c against the peer spec's size-bound
-section together and confirm they state one rule, not two.
+passes with no FreeBSD, no `pkg` and no second machine.
+`internal/daemon/repodb_test.go` gained three fixture-only tests: the two skip
+causes are counted and named separately, a row failing both counts once, and
+`namesForLog` caps its list with the elided count. Confirmed in `internal/peer`
+that `ErrHashMismatch` is still the only thing that reaches `Block` —
+`TestFetchFirstBlacklistsCorruptPeer` and
+`TestFetchFirstDoesNotBlacklistUnreachablePeer` bracket it. No new size-check
+test: the read cap lands with §5.3. UC-02 steps 9, 9c and 11c were read against
+the peer spec's size-bound section together and state one rule, not two.
 
 ## Uncertainty raised, per ground rule 2
 
-Everything above was put to the owner as a question before being written down;
-none of it was an implementer's reasonable interpretation. Still unanswered and
-still blocking §5.3: the §4.2 **per-remote-IP cap**. A global concurrency limit
-lets one hostile IP hold every slot, because nothing reclaims them, and a
-per-remote-IP cap is in no spec.
+Still unanswered and still blocking §5.3: the §4.2 **per-remote-IP cap**. A
+global concurrency limit lets one hostile IP hold every slot, because nothing
+reclaims them, and a per-remote-IP cap is in no spec.
