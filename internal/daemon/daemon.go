@@ -3,11 +3,9 @@ package daemon
 import (
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"sync"
 	"syscall"
 
@@ -77,31 +75,14 @@ func Start(cfg *config.DaemonConfig, configPath string) error {
 	return nil
 }
 
-// servingPort extracts the port a peer would dial us on.
-//
-// PROVISIONAL. v0.2 has the daemon announce the port it listens on for peer
-// transfers, which is not necessarily the port it serves HTTP on -- and the
-// mirror facade needs a third, loopback-only port that config does not have
-// either. config.DaemonConfig carries a single ListenAddr, so this reuses it,
-// which is exactly what the pre-v0.2 code did when it announced ListenAddr as
-// its address. Splitting the ports is a config change and an open question for
-// the spec owner; see the work log.
-func servingPort(listenAddr string) (int, error) {
-	_, portStr, err := net.SplitHostPort(listenAddr)
-	if err != nil {
-		return 0, fmt.Errorf("listen_addr is not host:port: %w", err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return 0, fmt.Errorf("listen_addr port %q is not a number: %w", portStr, err)
-	}
-	return port, nil
-}
-
 // startDiscoveryLocked starts the cache watcher and the tracker conversation.
 // CALLER MUST HOLD d.mu.
 func (d *Daemon) startDiscoveryLocked() error {
-	port, err := servingPort(d.config.ListenAddr)
+	// The announced port is the serving address's port, read straight off
+	// the config. The provisional derivation that used to live here -- one
+	// listen address doing duty for all three ports -- is gone with the
+	// two-address schema.
+	port, err := d.config.ServingPort()
 	if err != nil {
 		return err
 	}
@@ -173,16 +154,16 @@ func (d *Daemon) startHTTPServerLocked() error {
 	// server (peer.Server, UC-06) both still need mounting. Neither can go
 	// on this mux: the facade must be loopback-only on its own port, and
 	// peer.Server speaks the peerwire framing, not HTTP. Both are blocked
-	// on the config change noted in servingPort.
+	// on the repository database, which nothing implements yet.
 	mux := http.NewServeMux()
 
 	d.httpServer = &http.Server{
-		Addr:    d.config.ListenAddr,
+		Addr:    d.config.FacadeAddr,
 		Handler: mux,
 	}
 
 	go func() {
-		log.Printf("HTTP server listening on %s", d.config.ListenAddr)
+		log.Printf("HTTP server listening on %s", d.config.FacadeAddr)
 		if err := d.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP server error: %v", err)
 		}
@@ -224,24 +205,27 @@ func (d *Daemon) Reload() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	addrChanged := d.config.ListenAddr != newCfg.ListenAddr
+	// The two addresses now move independently: facade_addr is the local
+	// listener, serving_addr is what the tracker advertises for us.
+	facadeChanged := d.config.FacadeAddr != newCfg.FacadeAddr
+	servingChanged := d.config.ServingAddr != newCfg.ServingAddr
 	trackerChanged := d.config.TrackerURL != newCfg.TrackerURL
 	cacheChanged := d.config.CacheDir != newCfg.CacheDir
 
 	d.config = newCfg
 
-	if addrChanged {
+	if facadeChanged {
 		if err := d.startHTTPServerLocked(); err != nil {
 			return fmt.Errorf("failed to restart HTTP server: %w", err)
 		}
-		log.Printf("HTTP server restarted on %s", d.config.ListenAddr)
+		log.Printf("HTTP server restarted on %s", d.config.FacadeAddr)
 	}
 
-	// The serving port is derived from ListenAddr, so an address change
-	// means the tracker is advertising a stale port for us and discovery
-	// has to restart too. A cache change means the watcher is watching the
-	// wrong directory.
-	if trackerChanged || addrChanged || cacheChanged {
+	// A serving address change means the tracker is advertising a stale
+	// port for us, so discovery has to re-announce. A facade change does
+	// not: nothing about the facade's port reaches the tracker. A cache
+	// change means the watcher is watching the wrong directory.
+	if trackerChanged || servingChanged || cacheChanged {
 		d.stopDiscoveryLocked()
 		if err := d.startDiscoveryLocked(); err != nil {
 			return fmt.Errorf("failed to restart discovery: %w", err)

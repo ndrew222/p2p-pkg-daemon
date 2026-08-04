@@ -15,8 +15,20 @@ import (
 // DaemonConfig holds persistent configuration fields. as JSON tag
 type DaemonConfig struct {
 	TrackerURL string `json:"tracker_url"`
-	ListenAddr string `json:"listen_addr"`
-	BufferDir  string `json:"buffer_dir"`
+
+	// FacadeAddr is where pkg reaches the daemon: the mirror facade's
+	// listener (UC-02, UC-07). It MUST be a loopback address -- see
+	// validateFacadeAddr. pkg is the only client that has any business
+	// talking to this port, and it runs on this host.
+	FacadeAddr string `json:"facade_addr"`
+
+	// ServingAddr is where other daemons reach this one for peer transfers
+	// (UC-06). It is public, and its port is what gets announced to the
+	// tracker as servingPort -- the tracker cannot infer it, because the
+	// source port of our outbound HTTP connection is unrelated to it.
+	ServingAddr string `json:"serving_addr"`
+
+	BufferDir string `json:"buffer_dir"`
 
 	// CacheDir is pkg's package cache, which the daemon watches to learn
 	// what it can serve. READ-ONLY: the daemon writes only to BufferDir
@@ -31,8 +43,11 @@ func DefaultConfig() *DaemonConfig {
 	home, _ := os.UserHomeDir()
 	return &DaemonConfig{
 		TrackerURL: "http://127.0.0.1:8080",
-		ListenAddr: "127.0.0.1:9001",
-		BufferDir:  filepath.Join(home, ".cache", "jmj"),
+		FacadeAddr: "127.0.0.1:9001",
+		// All interfaces: peers are by definition on other machines, so
+		// unlike the facade this one cannot be loopback.
+		ServingAddr: "0.0.0.0:9002",
+		BufferDir:   filepath.Join(home, ".cache", "jmj"),
 		// FreeBSD's pkgng cache, as named in UC-05, UC-06 and the
 		// use-case table. Overridable so the daemon can be exercised
 		// on a non-FreeBSD box.
@@ -86,6 +101,63 @@ func Load(path string) (*DaemonConfig, error) {
 	return cfg, nil
 }
 
+// ServingPort is the port announced to the tracker as servingPort. It is the
+// port half of ServingAddr and nothing else -- there is no derivation, no
+// fallback, and no relationship to the facade's port.
+func (c *DaemonConfig) ServingPort() (int, error) {
+	_, portStr, err := net.SplitHostPort(c.ServingAddr)
+	if err != nil {
+		return 0, fmt.Errorf("serving_addr is not host:port: %w", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, fmt.Errorf("serving_addr port %q is not a number: %w", portStr, err)
+	}
+	return port, nil
+}
+
+// validateAddr checks the "host:port" shape and the port range shared by both
+// listen addresses.
+func validateAddr(field, addr string) (host string, err error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s format (need host:port): %w", field, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1024 || port > 65535 {
+		return "", fmt.Errorf("%s port must be 1024-65535, got %q", field, portStr)
+	}
+	return host, nil
+}
+
+// validateFacadeAddr enforces the loopback rule.
+//
+// This is mandatory, not advisory. The facade answers with package bytes on
+// behalf of a mirror; exposing it off-host would let anyone on the network
+// drive this daemon's fetch loop and use it as an open relay for traffic it
+// pays for. An empty host is rejected for the same reason -- in Go that means
+// every interface, which is the opposite of what is wanted here.
+func validateFacadeAddr(addr string) error {
+	host, err := validateAddr("facade_addr", addr)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return fmt.Errorf("facade_addr must be a loopback address; %q listens on every interface", addr)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("facade_addr host %q is not an IP address or \"localhost\"", host)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("facade_addr must be a loopback address, got %q; pkg runs on this host and nothing else may reach the facade", host)
+	}
+	return nil
+}
+
 // ValidateFields checks everything that can be judged from the values alone.
 // It touches the filesystem not at all and has no side effects, so it is safe
 // to run against a config meant for a different machine -- which is exactly
@@ -96,16 +168,14 @@ func ValidateFields(cfg *DaemonConfig) error {
 		return fmt.Errorf("invalid tracker_url: %w", err)
 	}
 
-	// ListenAddr: must be "host:port" and port in 1024-65535
-	_, portStr, err := net.SplitHostPort(cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("invalid listen_addr format (need host:port): %w", err)
+	if err := validateFacadeAddr(cfg.FacadeAddr); err != nil {
+		return err
 	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1024 || port > 65535 {
-		return fmt.Errorf("listen_addr port must be 1024-65535, got %q", portStr)
+	// serving_addr carries no host restriction: peers are on other
+	// machines, so any interface is legitimate.
+	if _, err := validateAddr("serving_addr", cfg.ServingAddr); err != nil {
+		return err
 	}
-	// Optional: host can be empty or IP; we don't need further validation.
 
 	if cfg.BufferDir == "" {
 		return fmt.Errorf("buffer_dir must be set")
