@@ -28,7 +28,8 @@ commit as the work.
 - **Work log required.** `docs/logs/<author>-<feature>.md` for every feature,
   including your areas of uncertainty and whether you raised them.
 
-Current branch: `claude/proto-v0.2`, ahead of `main`.
+Current branch: `claude/branch-handoff-j5u55i`, ahead of `main` by the peer
+blacklist (§5.5) and main merged back into it.
 
 ## 1. Document map — what to trust
 
@@ -67,12 +68,15 @@ Gate passes. What exists and works:
 - `internal/config` — load / validate / generate-to-stdout. Two listen
   addresses, `facade_addr` loopback-enforced. No writer, by design.
 - `internal/daemon/facade.go` — the mirror facade handler. Path rule handles
-  `All/Hashed/` and `~hash10`; spools through `temp_dir`. **Not mounted.**
+  `All/Hashed/` and `~hash10`; spools through `temp_dir`; skips and marks
+  blacklisted peers via `peer.FetchFirst`. **Not mounted.**
 - `internal/peer` + `internal/peerwire` — fetch and seed over the interim binary
   framing. **Not mounted**, and being replaced (§3.2).
+- `internal/peer/blacklist.go` — the local peer blacklist (§5.5). In-memory, no
+  expiry, not persisted; one list per `Facade`.
 
-What does not exist at all: a repository-database reader, the local peer
-blacklist, and any wiring that puts the facade or the seed server on a port.
+What does not exist at all: a repository-database reader, and any wiring that
+puts the facade or the seed server on a port.
 
 **The daemon still does nothing useful against a real FreeBSD host**, but for
 one reason now rather than two: there is no repo DB reader (§5.2), so `Hashes`
@@ -262,17 +266,23 @@ on `serving_addr`. Remember to pass `config.TempDir` into `Facade.TempDir` when
 you wire it — nothing constructs a `Facade` today, so the field is set by no
 caller yet.
 
-### 5.5 Local peer blacklist
-**Check before starting: an implementation exists on the unmerged branch
-`claude/branch-handoff-j5u55i` (`baa515a`)**, adding `internal/peer/blacklist.go`
-with tests and touching `facade.go`, `download.go` and `serve.go`. It has not
-been reviewed or merged, and it was written before the §5.1 and §4.1 changes on
-this branch, so it will need rebasing. Read it before writing a second one.
+### 5.5 Local peer blacklist — **done**
+Landed via `claude/branch-handoff-j5u55i` (`baa515a`), merged into the §5.1/§4.1
+work rather than rebased onto it. `internal/peer/blacklist.go` plus
+`peer.FetchFirst`, which both `Download` and the facade now call instead of
+keeping two copies of the peer loop. Local only, never reported to the tracker.
+Work log: `docs/logs/claude-peer-blacklist.md`.
 
-UC-02 §11c requires it and nothing on this branch implements it. Local only — never reported to
-the tracker. It belongs to the fetch loop, not the mirror surface. Note the
-refinement in the updated UC-02: **only a size or hash mismatch blacklists.** A
-`404` means the peer no longer holds the file, not that it lied.
+Left deliberately undecided, and still open if the owner wants them: entries
+have **no expiry** and are **not persisted** across restarts, and a peer is
+blacklisted **for everything**, not per package. Each was unasked, so the
+literal reading won.
+
+One wrinkle worth a second look: UC-02's refinement says **a size or hash
+mismatch blacklists**, but the fetch path only ever raises `ErrHashMismatch` —
+there is no separate size check to trip, so "size" is currently unreachable
+rather than implemented. A `404` correctly does not blacklist: it means the peer
+no longer holds the file, not that it lied.
 
 ### 5.6 The other §4.1 half nobody has checked
 The facade and the watcher now agree on `~hash10`, but §7.5 below — whether the
@@ -282,11 +292,11 @@ observations; nothing proves the observations are consistent with each other.
 
 ## 6. Known defects
 
-- `peer.Server.Serve` `continue`s on **every** `Accept` error including
-  permanent ones, so it hot-spins on a closed listener. §5.3 deletes the loop
-  and the bug together.
-- `facade_test.go:53-57` deliberately leaks a listener to work around that bug.
-  Remove the workaround when the bug goes.
+- ~~`peer.Server.Serve` hot-spins on a closed listener.~~ **Fixed** with §5.5:
+  `Serve` returns on a permanent `Accept` error and backs off 5ms→1s on a
+  temporary one, the shape `net/http.Server.Serve` uses.
+- ~~`facade_test.go` leaks a listener to work around that bug.~~ **Fixed**
+  alongside it; the helper now closes its listener via `t.Cleanup`.
 - `cmd/demo` depends on `peerwire` and on `PackageSource.Get` returning
   `[]byte`. It must be rewritten in §5.3, not deleted.
 

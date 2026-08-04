@@ -62,9 +62,16 @@ type PackageHashes interface {
 // Facade serves pkg. Peers resolves who holds a package (the tracker client);
 // Hashes supplies the expected hash. A nil Hashes means the repository
 // database is not wired up yet, and every package request answers 404.
+//
+// Blacklist is the daemon's local record of peers that have served corrupt
+// bytes (UC-02 §11c). It lives on the facade rather than per request precisely
+// so it outlasts one request: a peer that fails verification is skipped by
+// every later fetch too. Zero value ready to use; use one Facade per daemon so
+// there is one list. A Facade must not be copied once used.
 type Facade struct {
-	Peers  peer.PeerLister
-	Hashes PackageHashes
+	Peers     peer.PeerLister
+	Hashes    PackageHashes
+	Blacklist peer.Blacklist
 
 	// TempDir is config.TempDir: where a download is spooled while it is
 	// in flight (UC-02 §8). Empty means os.TempDir(). The file is created
@@ -100,11 +107,12 @@ func (f *Facade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // servePackage runs UC-02 steps 5-10 for one package.
 //
-// The peer loop is written out here rather than delegating to peer.Download
+// The peer list is fetched here rather than delegating to peer.Download
 // because Download collapses "tracker returned nothing" and "every peer
 // failed" into one ErrNoPeers, and the mirror surface has to tell those apart:
 // the first is a 404 (this mirror holds nothing), the second a 502 (peers
-// claimed it and failed to deliver).
+// claimed it and failed to deliver). The loop itself is peer.FetchFirst, which
+// is where blacklist skipping and marking live.
 func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
 	if f.Hashes == nil {
 		log.Printf("facade: %q: no repository database wired up", nameVersion)
@@ -132,42 +140,36 @@ func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
 		return
 	}
 
-	// Try peers in tracker order. A peer that times out, errors, or returns
-	// bytes that fail verification costs one attempt and we move on.
-	//
-	// NOTE: UC-02 step 11c also requires marking a hash-mismatching peer in a
-	// local blacklist. No blacklist type exists yet, and it belongs to the
-	// fetch loop rather than the mirror surface, so it is not implemented
-	// here -- flagged in the work log.
-	for _, addr := range addrs {
-		data, err := peer.FetchFromPeer(addr, nameVersion, expectedHash)
-		if err != nil {
-			log.Printf("facade: %q: peer %s: %v", nameVersion, addr, err)
-			continue
-		}
-
-		// Spool the verified bytes through temp_dir before answering.
-		// UC-02 §8: a download lands in the temp buffer, and only a
-		// complete, verified file may reach pkg.
-		//
-		// Note what this costs today: FetchFromPeer has already
-		// materialised the whole package in memory, so the spool is a
-		// disk round-trip that buys nothing yet. It is here because the
-		// peer wire migration makes the fetch streaming, at which point
-		// this file is what keeps a 900 MB package off the heap. Delete
-		// it only together with that.
-		if err := f.spool(w, nameVersion, data); err != nil {
-			log.Printf("facade: %q: %v", nameVersion, err)
-			httpError(w, http.StatusInternalServerError, "cannot buffer the download")
-			return
-		}
-		log.Printf("facade: served %q from %s (%d bytes)", nameVersion, addr, len(data))
+	// Try peers in tracker order, skipping any already blacklisted. A peer
+	// that times out or errors costs one attempt; one that returns bytes
+	// failing verification is blacklisted on the way past (UC-02 §11c) so
+	// later requests do not pay for it again. FetchFirst logs which peer
+	// served the bytes, so nothing here needs the winning address.
+	data, err := peer.FetchFirst(addrs, nameVersion, expectedHash, &f.Blacklist)
+	if err != nil {
+		// Non-empty peer list, no verified bytes: either every attempt failed
+		// or everything on the list is already known corrupt. Both are an
+		// upstream fault, not "this mirror does not have it".
+		log.Printf("facade: %q: %d peers exhausted: %v", nameVersion, len(addrs), err)
+		httpError(w, http.StatusBadGateway, "no peer could serve a verified copy")
 		return
 	}
 
-	// Every peer tried, none verified.
-	log.Printf("facade: %q: %d peers exhausted", nameVersion, len(addrs))
-	httpError(w, http.StatusBadGateway, "no peer could serve a verified copy")
+	// Spool the verified bytes through temp_dir before answering. UC-02 §8: a
+	// download lands in the temp buffer, and only a complete, verified file
+	// may reach pkg.
+	//
+	// Note what this costs today: the fetch has already materialised the whole
+	// package in memory, so the spool is a disk round-trip that buys nothing
+	// yet. It is here because the peer wire migration makes the fetch
+	// streaming, at which point this file is what keeps a 900 MB package off
+	// the heap. Delete it only together with that.
+	if err := f.spool(w, nameVersion, data); err != nil {
+		log.Printf("facade: %q: %v", nameVersion, err)
+		httpError(w, http.StatusInternalServerError, "cannot buffer the download")
+		return
+	}
+	log.Printf("facade: served %q (%d bytes)", nameVersion, len(data))
 }
 
 // spool writes verified bytes to a temp file and serves the file to pkg.

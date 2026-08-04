@@ -121,6 +121,7 @@ on which one is sent.
 | Tracker returned an empty peer list | `404` | UC-02 §7b |
 | Tracker unreachable, timed out, or sent an unparseable reply | `502` | UC-02 §6a |
 | All peers tried; none produced verifying bytes (unreachable, errored, or hash mismatch) | `502` | UC-02 §9d |
+| Every peer on the list is already blacklisted, so none is tried | `502` | UC-02 §7, §9d |
 | Method other than `GET` | `405` | — |
 
 Rationale for the two debatable ones:
@@ -137,6 +138,15 @@ Rationale for the two debatable ones:
 `200` responses carry `Content-Type: application/octet-stream` and an accurate
 `Content-Length`. Error responses carry a short `text/plain` body; pkg ignores
 it, but a human running `curl` against the daemon should not get a blank page.
+
+## Peer blacklist
+
+The facade holds the daemon's local blacklist (UC-02 §7, §11c) for its whole
+run, not per request: a peer whose bytes fail hash verification is marked
+untrusted and skipped by every later fetch. Only a hash mismatch marks a peer —
+an unreachable peer or a timeout costs one attempt and nothing more. The list
+is local, in memory, never persisted, never reported to the tracker, and has no
+expiry (nothing specifies one). See `docs/logs/claude-peer-blacklist.md`.
 
 ## What the facade does not do
 
