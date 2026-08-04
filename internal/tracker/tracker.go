@@ -1,219 +1,272 @@
+// Package tracker is the in-memory lookup service of tracker protocol v0.2.
+// Daemons announce the packages they can serve; it answers "who has package
+// X?" with addresses. It never relays package bytes and never verifies that a
+// daemon really holds what it announced -- integrity is end-to-end, checked by
+// the downloading daemon against a trusted hash.
 package tracker
 
 import (
-	"log"  // print to stderr with timestamps
-	"sync" // concurrency primitives, used for sync.RWMutex
-	"time" // timestamps and duration, provide clocks
+	"log"
+	"sync"
+	"time"
 
-	"github.com/ndrew222/p2p-pkg-daemon/internal/proto" //import from proto, separate package (PeerID, AnnounceRequest, PingRequest and PeerInfo live there)
+	"github.com/ndrew222/p2p-pkg-daemon/internal/proto"
 )
 
-// LeaseTTL (Lease time to live) is how long a peer's registration survives without a heartbeat
-// Daemons should ping  within window
-// Peers heartbeat into the tracker instead of tracker trying to reach every peer's network through NATs and firewalls, but pretty much impossible
-const LeaseTTL = 60 * time.Second
+const (
+	// Timeout is v0.2 TIMEOUT: how long a registration survives without a
+	// ping or announce. Config-overridable via NewWithTimeout; the only
+	// hard rule in the spec is PING_INTERVAL < TIMEOUT (20s < 60s).
+	Timeout = 60 * time.Second
 
-// background sweeper removes dead peers every 15s
-// stale peers only last for 15s
-const SweepInterval = 15 * time.Second
+	// SweepInterval is how often expired entries are reaped. Not a
+	// protocol constant -- Peers() already ignores entries past their
+	// deadline, so the sweeper is only there to stop the maps growing.
+	SweepInterval = 15 * time.Second
 
-// peerRecord is what we remember about one live peer
-// lower case: unexported, private to tracker, no one outside can construct or inspect one
+	// MaxPeers is v0.2 MAX_PEERS: the cap on a /peers reply. Provisional,
+	// pending the unresolved 3-vs-1 privacy question from v0.1.
+	MaxPeers = 3
+)
+
+// peerRecord is one daemon's registration. Keyed by IP in Tracker.peers, so
+// the IP is not repeated here.
 type peerRecord struct {
-	Addr     string
-	LastSeen time.Time
-	// Go has no set type to help find which CIDs a peer holds
-	// Fake it using a map for its keys, and assign cheapest value slot: struct{}, 0 bytes per entry
-	CIDs map[string]struct{} // set of CIDs this peer claims to hold
+	// ServingPort is the peer-transfer listen port. It must come from the
+	// announce body: the source port of the daemon's outbound HTTP
+	// connection is unrelated to what it listens on.
+	ServingPort int
+
+	// Deadline is when this entry dies if nothing refreshes it. The spec
+	// models expiry as a deadline rather than a last-seen timestamp, so
+	// that is what is stored.
+	Deadline time.Time
+
+	// Go has no set type. A map to the empty struct is the cheap stand-in:
+	// zero bytes per entry.
+	Packages map[string]struct{}
 }
 
-// Tracker is the in-memory registry. Safe for concurrent use
-// all 3 fields lower case, kept private, ensures others from a handler with no lock can write it
+// Tracker is the in-memory registry. Safe for concurrent use.
+//
+// v0.2 §State keys entries by public IP, taken from the connection's source
+// address and never from a message body. One consequence, accepted for now:
+// one daemon per public IP. Two daemons behind the same NAT overwrite each
+// other's entry.
 type Tracker struct {
-	mu    sync.RWMutex                         // above data to guard it
-	peers map[proto.PeerID]*peerRecord         // who is alive, where, holding what. use a pointer to prevent modifying a copy. If modified a copy, lease never renew as map remains unchanged, every peer expires every 60s
-	cids  map[string]map[proto.PeerID]struct{} // CID -> set of holders. two maps pointing at each other.
+	mu sync.RWMutex
+
+	// peers is IP -> record. Pointer values, so a ping refreshes the record
+	// in the map rather than a copy of it.
+	peers map[string]*peerRecord
+
+	// packages is the reverse index, name-version -> set of IPs. Kept in
+	// step with peers under the same lock; Peers() would otherwise have to
+	// scan every registration on every lookup.
+	packages map[string]map[string]struct{}
+
+	// timeout is Timeout unless overridden. Held per-tracker so tests can
+	// exercise expiry without waiting a minute.
+	timeout time.Duration
 }
 
-// New returns an empty Tracker
-// all maps must be make-d before use otherwise writing to an empty (nil) map panics
-// this constructor exists to ensure that all maps are initialised
-// &tracker{} constructs a tracker, takes its address and returns the pointer, prevent copying a mutex (sync.RWMutex)
+// New returns an empty Tracker with the spec default timeout.
 func New() *Tracker {
+	return NewWithTimeout(Timeout)
+}
+
+// NewWithTimeout returns an empty Tracker with a custom entry timeout.
+// Maps must be made before use; writing to a nil map panics.
+func NewWithTimeout(timeout time.Duration) *Tracker {
 	return &Tracker{
-		peers: make(map[proto.PeerID]*peerRecord),
-		cids:  make(map[string]map[proto.PeerID]struct{}),
+		peers:    make(map[string]*peerRecord),
+		packages: make(map[string]map[string]struct{}),
+		timeout:  timeout,
 	}
 }
 
-// Announce registers or refreshes a peer and replaces its CID set.
-func (t *Tracker) Announce(req *proto.AnnounceRequest) {
-	// write lock, no one else (writer or reader) gets in until wew unlock
-	// announce mutates both maps, so need exclusivity to prevent data corruption
+// Announce registers or refreshes the daemon at ip and replaces its package
+// list. The list is a FULL REPLACEMENT, never a delta.
+//
+// An empty list deregisters: reply 200, store nothing, delete any existing
+// entry. That is how a daemon that just ran `pkg clean` withdraws, and how a
+// fresh daemon confirms the tracker is reachable.
+//
+// Accepted from any IP, known or unknown, solicited (after a 404 ping) or
+// unprompted. The caller is responsible for having validated req -- the
+// handler does that so a malformed body becomes a 400 rather than reaching
+// here at all.
+func (t *Tracker) Announce(ip string, req *proto.AnnounceRequest) {
 	t.mu.Lock()
-	// schedule unlock when function returns. ensures always unlock after announce is done
-	// written right after lock() to prevent early returns in the future , and lock is held forever
 	defer t.mu.Unlock()
 
-	// Remove the peer's old CID claims before installing the new ones,
-	// otherwise a peer that drops a package would still be listed for it (then list grows forever)
-	t.removePeerFromCIDs(req.PeerID)
+	// Strip the old claims first either way. A peer that dropped a package
+	// must stop being listed for it, or the index only ever grows.
+	t.removeFromIndex(ip)
 
-	set := make(map[string]struct{}, len(req.CIDs))
+	if len(req.Packages) == 0 {
+		delete(t.peers, ip)
+		log.Printf("tracker: announce ip=%s packages=0 (deregistered)", ip)
+		return
+	}
 
-	// loops over announched CIDs and add each CID to set. Ignore index
-	for _, cid := range req.CIDs {
-		set[cid] = struct{}{}
+	set := make(map[string]struct{}, len(req.Packages))
+	for _, nameVersion := range req.Packages {
+		set[nameVersion] = struct{}{}
 
-		// ok (true) if key exists, false it not
-		// distinguish between absent key and present key with zero value
-		holders, ok := t.cids[cid]
-
-		// if key is absent, map is nil. writing to it panics. So make a fresh set and store it
+		holders, ok := t.packages[nameVersion]
 		if !ok {
-			holders = make(map[proto.PeerID]struct{})
-			t.cids[cid] = holders
+			// Absent key means a nil map, which panics on write.
+			holders = make(map[string]struct{})
+			t.packages[nameVersion] = holders
 		}
-		holders[req.PeerID] = struct{}{}
+		holders[ip] = struct{}{}
 	}
 
-	// install new record
-	// overwrites any existing record
-	// & gives a pointer
-	t.peers[req.PeerID] = &peerRecord{
-		Addr:     req.Addr,
-		LastSeen: time.Now(), // starts lease clock
-		CIDs:     set,
+	t.peers[ip] = &peerRecord{
+		ServingPort: req.ServingPort,
+		Deadline:    time.Now().Add(t.timeout),
+		Packages:    set,
 	}
 
-	log.Printf("tracker: announce peer=%q addr=%q cids=%d",
-		req.PeerID, req.Addr, len(req.CIDs))
+	log.Printf("tracker: announce ip=%s port=%d packages=%d",
+		ip, req.ServingPort, len(set))
 }
 
-// Ping renews a peer's lease. Returns false if the peer is unknown
-// the daemon must Announce before it can Ping
-func (t *Tracker) Ping(req *proto.PingRequest) bool {
-	// mutates LastSeen, so need mutex
+// Ping refreshes the deadline for ip. It reports false if the tracker has no
+// entry for that IP, which the handler turns into the 404 that means
+// "announce yourself". That 404 is a normal control signal, not an error: it
+// is the whole tracker-restart self-healing path.
+func (t *Tracker) Ping(ip string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// prevents un-announced daemons (peer we have never seen) from pinging
-	// prevents attacks that can flood the pings if anyone can ping it
-	// annouce is registration, ping is for renewal
-	rec, ok := t.peers[req.PeerID]
+	rec, ok := t.peers[ip]
 	if !ok {
-		log.Printf("tracker: ping from unknown peer=%q", req.PeerID)
+		log.Printf("tracker: ping from unknown ip=%s", ip)
 		return false
 	}
 
-	// rec is *peerRecord, so u are writing through the pinter into actual record in map instead of a copy
-	rec.LastSeen = time.Now()
-	rec.Addr = req.Addr // address may have changed
-	log.Printf("tracker: ping peer=%q", req.PeerID)
+	// An entry past its deadline that the sweeper has not reached yet is
+	// already dead. Treating it as live here would let a daemon skip
+	// re-announcing after an outage longer than the timeout, leaving the
+	// index holding whatever stale list it last sent.
+	if time.Now().After(rec.Deadline) {
+		t.removeFromIndex(ip)
+		delete(t.peers, ip)
+		log.Printf("tracker: ping from expired ip=%s", ip)
+		return false
+	}
+
+	rec.Deadline = time.Now().Add(t.timeout)
+	log.Printf("tracker: ping ip=%s", ip)
 	return true
 }
 
-// Peers returns the live peers holding cid
-func (t *Tracker) Peers(cid string) []proto.PeerInfo {
-	// readlock, function only reads
-	// choosing RWMutex allows concurrent read locks in parallel for many goroutines
+// Peers returns up to MaxPeers live holders of nameVersion. Exact match only
+// -- no prefix, no fuzzy matching.
+//
+// The result is never nil: a miss is an empty list, which the handler renders
+// as {"peers": []}. A nil slice would marshal to `null` and break that.
+func (t *Tracker) Peers(nameVersion string) []proto.PeerInfo {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	holders, ok := t.cids[cid]
+	out := make([]proto.PeerInfo, 0, MaxPeers)
+
+	holders, ok := t.packages[nameVersion]
 	if !ok {
-		return nil
+		log.Printf("tracker: query pkg=%q -> 0 peers", nameVersion)
+		return out
 	}
 
 	now := time.Now()
-	out := make([]proto.PeerInfo, 0, len(holders))
-	for id := range holders {
-		rec, ok := t.peers[id]
+
+	// Map iteration order is random, so which MaxPeers holders a caller
+	// gets varies between requests. That is not a problem to fix: it
+	// spreads load across holders for free.
+	for ip := range holders {
+		if len(out) == MaxPeers {
+			break
+		}
+
+		rec, ok := t.peers[ip]
 		if !ok {
-			continue // swept between reads; skip
+			continue // swept between reads
+		}
+		if now.After(rec.Deadline) {
+			continue // expired; the sweeper has not got to it yet
 		}
 
-		// now.Sub() returns duration. longer than TTL and the peer is dead
-		if now.Sub(rec.LastSeen) > LeaseTTL {
-			continue // stale; sweeper hasn't got to it yet
-		}
-
-		// builds the response. only respond with ID and address
-		out = append(out, proto.PeerInfo{PeerID: id, Addr: rec.Addr})
+		out = append(out, proto.PeerInfo{IP: ip, Port: rec.ServingPort})
 	}
 
-	log.Printf("tracker: query cid=%q -> %d peers", cid, len(out))
+	log.Printf("tracker: query pkg=%q -> %d peers", nameVersion, len(out))
 	return out
 }
 
-// Sweep removes peers whose lease has expired. Returns how many it dropped.
-// all request blocked while sweeping, its ok since sweeps are fast and infrequent.
+// Sweep deletes entries past their deadline and reports how many went. Expiry
+// is silent: there is nobody to notify.
+//
+// This holds the write lock for the whole scan, which blocks every request.
+// Acceptable while state is a map of at most a few thousand entries swept
+// every 15s.
 func (t *Tracker) Sweep() int {
-	// write lock needed as sweep deletes
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := time.Now()
 	dropped := 0
 
-	// range over t.peers gives both key (id) and value (rec) as you need ID to delete and record to check the lease
-	// removes CID first them record. Otherwise removePeerFromCIDs looks up a peer thats already gone, finds nothing, silent corruption
-	for id, rec := range t.peers {
-		if now.Sub(rec.LastSeen) > LeaseTTL {
-			t.removePeerFromCIDs(id) // cleanup
-			delete(t.peers, id)      // then, deletion
+	for ip, rec := range t.peers {
+		if now.After(rec.Deadline) {
+			// Index first: removeFromIndex reads t.peers[ip], so
+			// deleting the record first would silently strip
+			// nothing and leak the peer into the index forever.
+			t.removeFromIndex(ip)
+			delete(t.peers, ip)
 			dropped++
 
-			// kills daemon, wait, and prints so eviction is visible
-			// truncate to round the timing for readability, otherwise its long decimal
-			log.Printf("tracker: expired peer=%q (last seen %v ago)",
-				id, now.Sub(rec.LastSeen).Truncate(time.Second))
+			log.Printf("tracker: expired ip=%s (%v past deadline)",
+				ip, now.Sub(rec.Deadline).Truncate(time.Second))
 		}
 	}
-	return dropped // to know how many were dropped (int)
+	return dropped
 }
 
-// RunSweeper blocks, sweeping on a pinger. Run it in a goroutine.
-// fires repeatedly on an interval
-// every 15s, pinger sends current time down that channel .C
-// no returns, so blocks forever by design, so caller must run it in its own goroutine (go t.RunSweeper())
-// go before a function call starts new goroutine, sweeper runs alongside main at once
+// RunSweeper blocks, sweeping on a ticker. Run it in a goroutine.
 func (t *Tracker) RunSweeper() {
-	pinger := time.NewTicker(SweepInterval)
-	defer pinger.Stop()  // release pingers resource when funcion exits
-	for range pinger.C { // each recieve blocks until next ping arrives so loop body runs exactly once per interval, and between pings the goroutine is parked (deschedule, no CPU consumption)
+	ticker := time.NewTicker(SweepInterval)
+	defer ticker.Stop()
+	for range ticker.C {
 		t.Sweep()
-
 	}
 }
 
-// removePeerFromCIDs strips a peer from every CID it was listed under
-// CALLER MUST HOLD THE WRITE LOCK, as it does not lock on its own
-// cant lock itself as sync.RWMutex is not reentrant. If announce holds the lock and then calls a function that tries to lock agin, goroutine waits for a lock it itself is holding = deadlock. goroutine stops forever
-// lower case: private helper
-func (t *Tracker) removePeerFromCIDs(id proto.PeerID) {
-
-	// peer isnt there, nothing to strip so return
-	rec, ok := t.peers[id]
+// removeFromIndex strips ip from every package it was listed under.
+//
+// CALLER MUST HOLD THE WRITE LOCK. It cannot take one itself: sync.RWMutex is
+// not reentrant, so a locked caller calling a locking helper deadlocks against
+// itself.
+func (t *Tracker) removeFromIndex(ip string) {
+	rec, ok := t.peers[ip]
 	if !ok {
 		return
 	}
 
-	// iterate over peer record CID instead of global (t.CIDs) which can be huge
-	for cid := range rec.CIDs {
-
-		// holders: map, a reference type, modifying this modify real set inside t.cids
-		// get holder set for that CID, remove holder
-		holders, ok := t.cids[cid]
+	// Iterate the peer's own list, not the global index, which may be
+	// orders of magnitude larger.
+	for nameVersion := range rec.Packages {
+		holders, ok := t.packages[nameVersion]
 		if !ok {
 			continue
 		}
-		delete(holders, id)
+		delete(holders, ip)
 
-		// remove CID entry entirely is holder deleted is the last holder
-		// prevent accumulation of empty sets in t.cids. Can lead to memory leak
+		// Don't leak empty holder sets; over a long uptime they are a
+		// slow memory leak keyed by every package ever announced.
 		if len(holders) == 0 {
-			delete(t.cids, cid) // don't leak empty CID entries
+			delete(t.packages, nameVersion)
 		}
 	}
 }

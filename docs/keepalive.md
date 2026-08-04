@@ -80,14 +80,20 @@ type Cache interface {
 }
 ```
 
-- `Tracker` will be satisfied by `discovery.Client` once the wire format (spec
-  v0.2) is finalised. Until then it's just a stand-in.
-- `Cache` is satisfied by the cache watcher's scan. It must return an *error* on
-  failure, never an empty list (see `announce()`).
+- `Tracker` is satisfied by `*discovery.Client`, asserted at compile time in
+  `client.go`. It was a stand-in until spec v0.2 landed; the interface did not
+  have to change to accommodate the real client.
+- `Cache` is satisfied by `daemon.cacheSource`, which wraps the cache watcher
+  and maps `PackageInfo` to the name-version strings that go on the wire. The
+  adapter lives in `daemon` because `discovery` cannot import it without a
+  cycle. It must return an *error* on failure, never an empty list (see
+  `announce()`) — an empty list is the deregistration path, so reporting a
+  failed scan as "no packages" would silently withdraw the daemon.
 
-This is why the loop is fully written and tested even though the wire format
-isn't final: the interfaces pin the v0.1 semantics (settled), and only the
-encoding behind them is still open.
+Writing the loop against interfaces before the wire format was final turned out
+to be the right call: the v0.1 semantics these pin were settled, only the
+encoding behind them was open, and when v0.2 arrived the loop needed no
+changes at all.
 
 ## Tests
 
@@ -99,10 +105,20 @@ one per branch above (KA-01..KA-08).
 go test -v ./internal/discovery/
 ```
 
-## Yet to resolve issues
+## Resolved
 
-- **Identity model.** v0.1 keys the tracker on the connection's source IP, not a
-  `peer_id` in the request body. `client.go` currently still sends `peer_id`.
-  This changes `Ping`/`Announce` signatures once resolved — raised, pending v0.2.
-- **Wire encoding** (endpoints, status codes, JSON shapes) — blocked on v0.2.
-  The loop won't change; only the `Client` behind the interface will.
+Both items below were open pending v0.2. Both are now done, and the prediction
+held: the loop did not change, only the `Client` behind the interface did.
+
+- **Identity model.** Resolved as predicted — the tracker keys on the
+  connection's source IP and there is no `peer_id` anywhere on the wire.
+  `proto.PeerID` and `proto.PingRequest` are gone; `Announce` takes
+  `(servingPort int, packages []string)` and `Ping` takes nothing, which is
+  exactly the `Tracker` interface this document already specified.
+- **Wire encoding.** Resolved: HTTP + JSON, `POST /ping` (empty body),
+  `POST /announce`, `GET /peers?pkg=`. Success is `200`, not the `204` the v0.1
+  client used. The load-bearing `404` on `/ping` still arrives as
+  `discovery.ErrUnknownPeer`, so the KA-03 branch is unchanged.
+
+`*discovery.Client` now satisfies this document's `Tracker` interface, asserted
+at compile time in `client.go`. See `docs/logs/claude-proto-v0.2.md`.

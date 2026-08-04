@@ -13,11 +13,17 @@ read the README and `docs/` instead; this file assumes you are an agent.
 
 1. `docs/tracker-protocol-spec-v0.2.md` — wire format (HTTP + JSON): endpoints, status codes, JSON shapes. **If this file does not exist yet, all wire-level code is blocked. Stop and wait.** v0.1 remains authoritative for protocol *semantics* (message meanings, state, life cycle, robustness requirements).
 2. `docs/tracker-protocol-spec-v0.1.md` — tracker semantics and definition of done.
-3. `docs/use-case-descriptions.md` — UC-01 … UC-07 behaviour spec.
-4. `docs/diagrams/uc-*.puml` — authoritative where the prose is ambiguous.
-5. `README.md` — orientation only.
+3. `docs/peer-transfer-spec-v0.2.md` — the daemon↔daemon wire for package bytes (UC-02 fetch loop, UC-06 serving side): HTTP over TCP, `GET /pkg/<name-version>`, status codes, the size and hash bound, buffering and timeouts.
+4. `docs/mirror-facade-spec-v0.1.md` — the pkg↔daemon wire (UC-02, UC-07): the `All/<name-version>.pkg` path rule and facade status codes.
+5. `docs/use-case-descriptions.md` — UC-01 … UC-07 behaviour spec.
+6. `docs/diagrams/uc-*.puml` — authoritative where the prose is ambiguous.
+7. `README.md` — orientation only.
+
+These are **three separate wires** and they do not share a path grammar. The peer wire's `/pkg/<name-version>` namespace is deliberately unlike the facade's `…/All/<name-version>.pkg` so that a seeding daemon cannot be mistaken for, or used as, a pkg mirror. Do not "unify" them.
 
 Deprecated: anything referencing IPFS, CIDs, or `peer_id`. Packages are addressed by `name-version` strings (e.g. `nginx-1.24.0_2`). If you find CID-based code or docs, flag it; do not extend it.
+
+Also deprecated: `internal/peerwire`, the interim length-prefixed binary framing for peer transfers, and its `MaxPayload` constant. It was explicitly a placeholder until the peer wire spec landed. That spec is now `docs/peer-transfer-spec-v0.2.md` and it chooses HTTP, so the package is to be deleted, not extended or chunked.
 
 ## Layout
 
@@ -64,10 +70,30 @@ Commit and branch naming: no convention, use your judgment.
 
 - `pkg` is never modified, wrapped, or patched. Integration surface = mirror HTTP.
 - The tracker never relays package bytes and never verifies content.
-- The daemon writes only to its own temp buffer directory and config path.
+- The daemon writes only to its own temp buffer directory.
   The pkg cache and repository database are read-only.
+- jmj requires no write privileges to be configured. `-generate-config` prints
+  a config to stdout with no side effects and the user redirects it; there is
+  no config writer in the codebase and no permission handling. Do not add one.
+  (The sole exception: the daemon makes a best-effort move of a corrupt config
+  to `.bak` at startup, and carries on with defaults if that fails.)
 - Announce lists are always full replacements, never deltas.
 - No hashing at announce time; sanity checks only. The downloader verifies.
+- **No fixed limit on package size.** The transfer bound is the exact expected
+  size from pkg's repository database, which is stricter than any constant and
+  has no ceiling. Do not reintroduce a global cap; the one that existed blocked
+  1.3% of the repository outright, including llvm, rust and chromium.
+- Neither end of a peer transfer holds a package in memory. The requester
+  streams to a temporary file and hashes incrementally; the seeder serves from
+  an open file handle. A `[]byte` in either signature is a regression.
 - Peer blacklisting is local-only; nothing is reported to the tracker.
 - No download throttling, no bandwidth management, no NAT traversal (ADR-001). These are out of scope. "No additional features, just implement the use cases."
+  Read that correctly. Rate control is not wrong in principle and this is not a
+  ban on thinking about it. It is out of scope because the earlier attempt at it
+  solved a problem nobody had, and did not even solve *that* coherently. If you
+  ever have a real, observed problem that rate control is the right answer to,
+  say so and make the case — do not smuggle one in, and equally do not cite this
+  line as a reason to leave a genuine defect unfixed.
+- A slow peer is out of scope, exactly as a slow mirror is. Do not add stall
+  detectors, minimum-throughput rules or transfer deadlines to "fix" it.
 ```

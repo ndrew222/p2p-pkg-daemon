@@ -1,123 +1,125 @@
+// Package discovery is the daemon's side of the tracker conversation:
+// tracker protocol v0.2, HTTP + JSON. Client is one-shot request/response;
+// the heartbeat loop that drives it lives in KeepAlive.
 package discovery
 
 import (
-	"bytes"    // for bytes.NewReader, turns []byte into stream as http.Post wants a stream
-	"errors"   // errors.New for sentinel, errors.Is for comparing against it
-	"fmt"      // fmt.Errorf for wrappting errors with context
-	"io"       // io.ReadAll and io.LimitReader
-	"log"      // for sequence diagram arrows
-	"net/http" // HTTP client, not the server
-	"net/url"  // safely building a query string
-	"time"     // Pinger and client timeout
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"time"
 
+	"github.com/ndrew222/p2p-pkg-daemon/internal/peer"
 	"github.com/ndrew222/p2p-pkg-daemon/internal/proto"
 )
 
-// PingInterval is how often the daemon renews its lease
-// Must be comfortably shorter than the tracker's LeaseTTL (60s)
-// not set at 60s as one slow ping and daemon expires, 20s allows for 2 consecutive faild pings and daemon still survives
+// PingInterval is how often the daemon renews its registration. It must be
+// comfortably shorter than the tracker's TIMEOUT (60s): at 20s, two
+// consecutive pings can be lost and the entry still survives.
 const PingInterval = 20 * time.Second
 
-// ErrUnknownPeer means the tracker has no record of us, it restarted, or our lease expired. The caller must reannounce.
+// requestTimeout bounds one HTTP exchange. The tracker is on the far side of a
+// network that may simply not answer.
+const requestTimeout = 10 * time.Second
+
+// ErrUnknownPeer is the 404 on /ping: the tracker has no entry for our IP,
+// because it restarted or our deadline passed. It is a normal control signal,
+// not a failure -- the caller's correct response is to announce. It has its
+// own error value so callers can test for it with errors.Is rather than
+// matching on a string.
 var ErrUnknownPeer = errors.New("discovery: tracker does not know this peer")
 
-// Client talks to the tracker on behalf of one daemon.
+// Client talks to one tracker on behalf of one daemon.
+//
+// It carries no identity. Under v0.2 the tracker keys state by the connection's
+// source IP, so there is nothing to send and nothing to get wrong.
 type Client struct {
-	trackerURL string        // e.g. "http://127.0.0.1:8080". The base, methods append /announce, /ping, /peers
-	peerID     proto.PeerID  // our identity
-	addr       string        // our own host:port, where peers reach us
-	http       *http.Client  // reused; carries the timeout
-	stopChan   chan struct{} // channel to signal the heartbeat goroutine to stop
+	trackerURL string       // base, e.g. "http://127.0.0.1:8080"; methods append the path
+	http       *http.Client // reused, carries the timeout
 }
 
-// New returns a Client bound to one tracker and one identity
-// takes three things that vary per daemon, builds HTTP client internally with timeout baked in
-// returns *Client so http.Client isnt copied around
-func New(trackerURL string, peerID proto.PeerID, addr string) *Client {
+// Compile-time proof that Client is the seam both sides expect. These are the
+// point of the v0.2 migration: before it, ValidateCID's 64-hex-char pattern
+// made peer.PeerLister unsatisfiable by anything that speaks to a real
+// tracker, and the mirror facade had no way to reach one.
+var (
+	_ Tracker         = (*Client)(nil)
+	_ peer.PeerLister = (*Client)(nil)
+)
+
+// New returns a Client bound to one tracker.
+func New(trackerURL string) *Client {
 	return &Client{
 		trackerURL: trackerURL,
-		peerID:     peerID,
-		addr:       addr,
-		http:       &http.Client{Timeout: 10 * time.Second},
-		stopChan:   make(chan struct{}),
+		http:       &http.Client{Timeout: requestTimeout},
 	}
 }
 
-// Announce registers our full CID list with the tracker
-// Builds request struct from our identity plus callers CID list
-// c.peerID and c.addr come from client. caller dont supply them and cant get them wrong
-func (c *Client) Announce(cids []string) error {
+// Announce registers our full package list. The list is a FULL REPLACEMENT,
+// never a delta; an empty one deregisters us.
+//
+// servingPort must come from us: the tracker cannot infer it, because the
+// source port of this outbound HTTP request has nothing to do with the port we
+// listen on for peer transfers.
+func (c *Client) Announce(servingPort int, packages []string) error {
 	req := proto.AnnounceRequest{
-		PeerID: c.peerID,
-		Addr:   c.addr,
-		CIDs:   cids,
+		ServingPort: servingPort,
+		Packages:    packages,
 	}
 
-	// Validate before sending. Never make the tracker reject what we could have caught ourselves.
-	// catches any malformed addr (typo or empty flag for example)
-	// %w wraps so errors.Is still works on whatever came out of Validate
+	// Validate before sending. Never make the tracker reject what we could
+	// have caught ourselves.
 	if err := req.Validate(); err != nil {
 		return fmt.Errorf("discovery: announce: %w", err)
 	}
 
-	// struct to JSON bytes
 	body, err := proto.Encode(&req)
 	if err != nil {
 		return fmt.Errorf("discovery: announce: %w", err)
 	}
 
-	// bytes.NewReader(): post wants an io.Reader(a stream), but we have a []byte(block)
-	// application/json is the content type header, tells the tracker how to interpret the bytes
-	// returns (*https.Response, error)
-	// error means request never completed (eg DNS failed, connection refused, timeout etc), dont mean tracker returned an error status
-	resp, err := c.http.Post(c.trackerURL+"/announce",
-		"application/json", bytes.NewReader(body))
+	resp, err := c.http.Post(c.trackerURL+"/announce", "application/json", bytes.NewReader(body))
 	if err != nil {
+		// A transport error means the request never completed (DNS,
+		// connection refused, timeout). It does not mean the tracker
+		// said no.
 		return fmt.Errorf("discovery: announce: %w", err)
 	}
-	defer resp.Body.Close() // close response body, else it leaks underlying TCP connecion, never returns to pool and never gets reused. Then file descriptors get exhuasted and every sebsequent request fails
+	// Draining and closing returns the connection to the pool. Skipping it
+	// leaks a TCP connection per request until file descriptors run out.
+	defer drain(resp)
 
-	// tracker's handlers returns 204 No content on sucess, anything else is a failure
-	if resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("discovery: announce: tracker returned %s", resp.Status)
 	}
 
-	// sequence diagram arrow, client side
-	log.Printf("discovery: announced peer=%q cids=%d", c.peerID, len(cids))
+	log.Printf("discovery: announced port=%d packages=%d", servingPort, len(packages))
 	return nil
 }
 
-// Ping renews our lease. Returns ErrUnknownPeer if the tracker has
-// forgotten us; the caller should then re-announce.
+// Ping renews our deadline. It returns ErrUnknownPeer if the tracker has
+// forgotten us; the caller must then announce rather than retry the ping.
 func (c *Client) Ping() error {
-	req := proto.PingRequest{
-		PeerID: c.peerID,
-		Addr:   c.addr,
-	}
-
-	if err := req.Validate(); err != nil {
-		return fmt.Errorf("discovery: ping: %w", err)
-	}
-
-	body, err := proto.Encode(&req)
+	// No body: v0.2 makes ping a bare keep-alive. http.NewRequest rather
+	// than Post so we do not advertise a Content-Type for a body that does
+	// not exist.
+	req, err := http.NewRequest(http.MethodPost, c.trackerURL+"/ping", nil)
 	if err != nil {
 		return fmt.Errorf("discovery: ping: %w", err)
 	}
 
-	resp, err := c.http.Post(c.trackerURL+"/ping",
-		"application/json", bytes.NewReader(body))
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("discovery: ping: %w", err)
 	}
-	defer resp.Body.Close()
+	defer drain(resp)
 
-	// 204: lease renewed
-	// 404: tracker dont know us, return the sentinel ErrUnkownPeer, not a wrapped generic error
-	// anything else: genuinely wrong, generic error
-	// 404 gets its own error value for caller to detect it specifically instead of doing string matching to tell it apart from other failures. A sentinel allows one to compare agaisnt errors.Is
 	switch resp.StatusCode {
-	case http.StatusNoContent:
-		log.Printf("discovery: ping ok peer=%q", c.peerID)
+	case http.StatusOK:
 		return nil
 	case http.StatusNotFound:
 		return ErrUnknownPeer
@@ -126,34 +128,35 @@ func (c *Client) Ping() error {
 	}
 }
 
-// Peers asks the tracker who holds cid, valiate before sending, rather than round-tripping to find out any bad input that should be caught locally
-// returns ([]proto.PeerInfo, error). failure returns (nil, error)
-func (c *Client) Peers(cid string) ([]proto.PeerInfo, error) {
-	if err := proto.ValidateCID(cid); err != nil {
+// Peers asks the tracker who holds nameVersion and returns dialable
+// "host:port" addresses, in the tracker's order. This is the peer.PeerLister
+// the mirror facade consumes.
+//
+// An empty result is not an error: no holder is a valid answer.
+func (c *Client) Peers(nameVersion string) ([]string, error) {
+	// Validate locally rather than round-tripping to find out.
+	if err := proto.ValidateNameVersion(nameVersion); err != nil {
 		return nil, fmt.Errorf("discovery: peers: %w", err)
 	}
 
-	// url.Values escapes the query string properly
-	// url.Values is a map of query parameters. Encode() serialises it to cid=abc123
-	// if cid contained &,=,#, space or newline, naive concantation would inject those into URL structure, meaning attacker added a parameter we never intended
+	// url.Values escapes the parameter. Naive concatenation would let a
+	// name-version containing & or # inject query structure we never meant
+	// to send.
 	q := url.Values{}
-	q.Set("cid", cid)
-	target := c.trackerURL + "/peers?" + q.Encode()
+	q.Set("pkg", nameVersion)
 
-	// Get instead of Post as theres no body to send
-	// check for transport error then status code
-	// 200 code is accepted here as there is a body
-	resp, err := c.http.Get(target)
+	resp, err := c.http.Get(c.trackerURL + "/peers?" + q.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("discovery: peers: %w", err)
 	}
-	defer resp.Body.Close()
+	defer drain(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("discovery: peers: tracker returned %s", resp.Status)
 	}
 
-	// Bound the response. The tracker is not fully trusted either incase tracker itself is compromised.
+	// Bound the response. The tracker is not fully trusted either: it could
+	// itself be compromised, and what comes back feeds a dialler.
 	body, err := readLimited(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("discovery: peers: %w", err)
@@ -163,59 +166,28 @@ func (c *Client) Peers(cid string) ([]proto.PeerInfo, error) {
 	if err := proto.Decode(body, &out); err != nil {
 		return nil, fmt.Errorf("discovery: peers: %w", err)
 	}
-
-	// returns just the peers, caller only asked for who has the CID, no need for echoed CID
-	log.Printf("discovery: query cid=%q -> %d peers", cid, len(out.Peers))
-	return out.Peers, nil
-}
-
-// RunHeartbeat blocks, ping. Re-announces if the tracker has forgotten us. Run it in a goroutine.
-// cids is a callback so the daemon can report its current CID list at re-announce time, not a stale snapshot from startup.
-// parameter is a function, that when called returns the current CID list, passing it as function instead of string because CID list changes overtime, simply passing as []string only returns a snapshot at startup
-func (c *Client) RunHeartbeat(cids func() []string) {
-	pinger := time.NewTicker(PingInterval)
-	defer pinger.Stop()
-
-	// .C is a channel, every 20s a value arrives
-	// for range receives forever
-	// between pings, the goroutine is parked (descheduled, no CPU consumption)
-	for {
-		select {
-		case <-c.stopChan:
-			log.Printf("discovery: heartbeat stopped peer=%q", c.peerID)
-			return
-		case <-pinger.C:
-			err := c.Ping()
-			if err == nil {
-				continue // lease renewed, nothing to do, wait for next ping
-			}
-
-			//errors.Is walks the wrap chain
-			// cids() calls the callback, it fetch the current list right now and announce that
-			if errors.Is(err, ErrUnknownPeer) {
-				log.Printf("discovery: tracker forgot us; re-announcing") // self healing, tracker can be killed and daemon independently notices within 20s and re-registers itself. Rebuild the list
-				if err := c.Announce(cids()); err != nil {
-					log.Printf("discovery: re-announce failed: %v", err) // if reannounce fails, log it and continue. It retries forever at every new tick.
-				}
-				continue
-			}
-
-			// Network error, tracker down, etc. Log and keep trying.
-			// this function never returns, it is blocked forever by design in case tracker is unreachable which is to be expected.
-			log.Printf("discovery: ping failed: %v", err)
-		}
-
+	if err := out.Validate(); err != nil {
+		return nil, fmt.Errorf("discovery: peers: %w", err)
 	}
 
+	addrs := make([]string, 0, len(out.Peers))
+	for _, p := range out.Peers {
+		addrs = append(addrs, p.Addr())
+	}
+
+	log.Printf("discovery: query pkg=%q -> %d peers", nameVersion, len(addrs))
+	return addrs, nil
 }
 
-// readLimited reads at most 1 MiB from r then reports end of input no matter how much sender has left to send
-// otherwise io.ReadAll reads until sender stops. If sender never stops, read never stops, allocating forever, leads to memory exhaustion
+// readLimited reads at most MaxBodyBytes and then reports end of input, no
+// matter how much the sender has left. Plain io.ReadAll reads until the sender
+// stops; a sender that never stops is unbounded allocation.
 func readLimited(r io.Reader) ([]byte, error) {
-	return io.ReadAll(io.LimitReader(r, 1<<20))
+	return io.ReadAll(io.LimitReader(r, proto.MaxBodyBytes))
 }
 
-// Stop shuts down the heartbeat
-func (c *Client) Stop() {
-	close(c.stopChan)
+// drain empties and closes a response body so the connection can be reused.
+func drain(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, proto.MaxBodyBytes))
+	resp.Body.Close()
 }

@@ -11,16 +11,15 @@ import (
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/config"
 	"github.com/ndrew222/p2p-pkg-daemon/internal/discovery"
-	"github.com/ndrew222/p2p-pkg-daemon/internal/proto"
 )
 
 type Daemon struct {
 	mu         sync.Mutex
 	config     *config.DaemonConfig
 	configPath string
-	peerID     string
-	cids       []string
 	client     *discovery.Client
+	watcher    *Watcher
+	done       chan struct{} // closed to stop the keep-alive loop
 	httpServer *http.Server
 	running    bool
 }
@@ -30,80 +29,143 @@ var (
 	daemonMu     sync.Mutex
 )
 
-// Start initializes and runs the daemon with the given config
-func Start(cfg *config.DaemonConfig, peerID string, cids []string, configPath string) error {
+// cacheSource adapts the cache watcher to discovery.Cache. The keep-alive
+// wants the name-version strings that go on the wire; the watcher deals in
+// PackageInfo. SanityFilter has already dropped anything without both a name
+// and a version, so every entry here has a real name-version.
+type cacheSource struct {
+	watcher *Watcher
+}
+
+func (c cacheSource) Scan() ([]string, error) {
+	pkgs, err := c.watcher.Scan()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(pkgs))
+	for _, p := range pkgs {
+		out = append(out, p.NameVersion())
+	}
+	return out, nil
+}
+
+// Start initializes and runs the daemon with the given config.
+func Start(cfg *config.DaemonConfig, configPath string) error {
 	d := &Daemon{
 		config:     cfg,
 		configPath: configPath,
-		peerID:     peerID,
-		cids:       cids,
 		running:    true,
 	}
 
-	// Set global
 	daemonMu.Lock()
 	globalDaemon = d
 	daemonMu.Unlock()
 
-	// Start HTTP server
-	if err := d.startHTTPServer(); err != nil {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.startHTTPServerLocked(); err != nil {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
 	}
-
-	// Start discovery client with heartbeat
-	if err := d.startDiscovery(); err != nil {
+	if err := d.startDiscoveryLocked(); err != nil {
 		return fmt.Errorf("failed to start discovery: %w", err)
 	}
 
-	// Setup SIGHUP for hot reload
 	d.setupReloadHandler()
-
 	return nil
 }
 
-func (d *Daemon) startDiscovery() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	client := discovery.New(d.config.TrackerURL, proto.PeerID(d.peerID), d.config.ListenAddr)
-	if err := client.Announce(d.cids); err != nil {
-		return fmt.Errorf("initial announce failed: %w", err)
+// startDiscoveryLocked starts the cache watcher and the tracker conversation.
+// CALLER MUST HOLD d.mu.
+func (d *Daemon) startDiscoveryLocked() error {
+	// The announced port is the serving address's port, read straight off
+	// the config. The provisional derivation that used to live here -- one
+	// listen address doing duty for all three ports -- is gone with the
+	// two-address schema.
+	port, err := d.config.ServingPort()
+	if err != nil {
+		return err
 	}
 
-	d.client = client
+	// changed is the watcher's nudge to the keep-alive. Buffered with room
+	// for one, and the send below is non-blocking, which does two things:
+	// the watcher's event loop can never block on a keep-alive that is
+	// mid-announce, and a burst of events (installing one package pulls in
+	// dozens of dependencies, each firing an fsnotify event) collapses into
+	// a single pending re-announce instead of dozens.
+	changed := make(chan struct{}, 1)
+	onChange := func(ChangeEvent) {
+		select {
+		case changed <- struct{}{}:
+		default: // a re-announce is already pending; it will pick this up too
+		}
+	}
 
-	// Start heartbeat in background
-	getCIDs := func() []string { return d.cids }
-	go client.RunHeartbeat(getCIDs)
+	// repoDB is nil: no RepositoryDatabase implementation exists yet, so
+	// SanityFilter degrades to filename-format checks and skips the size
+	// comparison. Safe but weaker -- a truncated package can be announced,
+	// costing one wasted transfer, which the end-to-end hash check on the
+	// downloader's side catches. See the work log.
+	d.watcher = New(d.config.CacheDir, nil, nil, onChange)
+	if err := d.watcher.Start(); err != nil {
+		return fmt.Errorf("cache watcher: %w", err)
+	}
 
-	log.Printf("Discovery started: peer=%s, tracker=%s, addr=%s",
-		d.peerID, d.config.TrackerURL, d.config.ListenAddr)
+	d.client = discovery.New(d.config.TrackerURL)
+	d.done = make(chan struct{})
+
+	// KeepAlive owns the announce/ping loop, including the initial
+	// registration and the rule that we stay quiet while nothing is
+	// registered. A tracker that is down at startup is not fatal: the loop
+	// keeps trying, which is the self-healing behaviour v0.2 describes.
+	ka := discovery.NewKeepAlive(d.client, cacheSource{watcher: d.watcher}, port, changed)
+	go ka.Run(d.done)
+
+	log.Printf("Discovery started: tracker=%s, servingPort=%d, cache=%s",
+		d.config.TrackerURL, port, d.config.CacheDir)
 	return nil
 }
 
-func (d *Daemon) startHTTPServer() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// stopDiscoveryLocked stops the keep-alive loop and the cache watcher.
+// CALLER MUST HOLD d.mu. Safe to call when discovery was never started or is
+// already stopped.
+func (d *Daemon) stopDiscoveryLocked() {
+	if d.done != nil {
+		close(d.done)
+		d.done = nil // so a second call does not close a closed channel
+	}
+	if d.watcher != nil {
+		d.watcher.Stop()
+		d.watcher = nil
+	}
+}
 
+// startHTTPServerLocked (re)starts the daemon's HTTP listener.
+// CALLER MUST HOLD d.mu.
+func (d *Daemon) startHTTPServerLocked() error {
 	if d.httpServer != nil {
-		// Close old server if it exists
 		d.httpServer.Close()
 	}
 
+	// Deliberately empty. The /ping handler that used to be here was an
+	// invented health endpoint appearing in no spec, and it is gone.
+	//
+	// TODO: the mirror facade (Facade, UC-02/UC-07) belongs on this
+	// listener -- facade_addr is its address and the loopback rule is
+	// enforced in config. It is not mounted yet because Facade.Check fails
+	// without a repository database, which nothing implements. The peer
+	// seed server (peer.Server, UC-06) goes on serving_addr separately; it
+	// speaks the peerwire framing, not HTTP, until the peer wire migration
+	// lands.
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
-	})
-	// TODO: UC-06 will add /download, /serve endpoints
 
 	d.httpServer = &http.Server{
-		Addr:    d.config.ListenAddr,
+		Addr:    d.config.FacadeAddr,
 		Handler: mux,
 	}
 
 	go func() {
-		log.Printf("HTTP server listening on %s", d.config.ListenAddr)
+		log.Printf("HTTP server listening on %s", d.config.FacadeAddr)
 		if err := d.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP server error: %v", err)
 		}
@@ -128,44 +190,46 @@ func (d *Daemon) setupReloadHandler() {
 	}()
 }
 
-// Reload reloads the config from file and applies changes without restarting
+// Reload reloads the config from file and applies changes without restarting.
 func (d *Daemon) Reload() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Load new config
 	newCfg, err := config.Load(d.configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-
-	// Validate
 	if err := config.Validate(newCfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Check if address changed
-	addrChanged := d.config.ListenAddr != newCfg.ListenAddr
-	trackerChanged := d.config.TrackerURL != newCfg.TrackerURL
+	// Take the lock only once, and call the Locked helpers from under it.
+	// The previous version locked here and then called startHTTPServer,
+	// which locked again -- sync.Mutex is not reentrant, so any SIGHUP
+	// that changed the listen address deadlocked the daemon.
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	// Update config
+	// The two addresses now move independently: facade_addr is the local
+	// listener, serving_addr is what the tracker advertises for us.
+	facadeChanged := d.config.FacadeAddr != newCfg.FacadeAddr
+	servingChanged := d.config.ServingAddr != newCfg.ServingAddr
+	trackerChanged := d.config.TrackerURL != newCfg.TrackerURL
+	cacheChanged := d.config.CacheDir != newCfg.CacheDir
+
 	d.config = newCfg
 
-	// If address changed, restart HTTP server
-	if addrChanged {
-		if err := d.startHTTPServer(); err != nil {
+	if facadeChanged {
+		if err := d.startHTTPServerLocked(); err != nil {
 			return fmt.Errorf("failed to restart HTTP server: %w", err)
 		}
-		log.Printf("HTTP server restarted on %s", d.config.ListenAddr)
+		log.Printf("HTTP server restarted on %s", d.config.FacadeAddr)
 	}
 
-	// If tracker changed, restart discovery
-	if trackerChanged || addrChanged {
-		// Stop old client (needs Stop() method on discovery.Client)
-		if d.client != nil {
-			d.client.Stop()
-		}
-		if err := d.startDiscovery(); err != nil {
+	// A serving address change means the tracker is advertising a stale
+	// port for us, so discovery has to re-announce. A facade change does
+	// not: nothing about the facade's port reaches the tracker. A cache
+	// change means the watcher is watching the wrong directory.
+	if trackerChanged || servingChanged || cacheChanged {
+		d.stopDiscoveryLocked()
+		if err := d.startDiscoveryLocked(); err != nil {
 			return fmt.Errorf("failed to restart discovery: %w", err)
 		}
 		log.Printf("Discovery re-announced to %s", d.config.TrackerURL)
@@ -174,7 +238,7 @@ func (d *Daemon) Reload() error {
 	return nil
 }
 
-// Stop gracefully shuts down the daemon
+// Stop gracefully shuts down the daemon.
 func (d *Daemon) Stop() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -184,10 +248,7 @@ func (d *Daemon) Stop() error {
 	if d.httpServer != nil {
 		d.httpServer.Close()
 	}
-
-	if d.client != nil {
-		d.client.Stop()
-	}
+	d.stopDiscoveryLocked()
 
 	return nil
 }

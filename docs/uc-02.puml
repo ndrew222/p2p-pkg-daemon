@@ -11,42 +11,44 @@ User -> pkg: pkg.install(packageName-version)
 
 pkg -> pkg: searchDatabase(packageName-version)
 
-alt [packageName-version is invalid]
+alt packageName-version is invalid
     pkg --> User : error("unknown package")
 
-else [package name is valid]
+else package name is valid
     pkg -> pkg: isDownloaded(packageName-version)
 
-    alt [file already local]
+    alt file already local
         pkg -> pkg: install(packageName-version)
 
-    else [file not local]
+    else file not local
         pkg -> Daemon: packageName-version
         note right : If pkg requests multiple packages,\neach is handled as an independent\nrequest (no batching at the tracker)
 
         activate Daemon
         Daemon -> Tracker: IWant(packageName-version)
 
-        alt [tracker connected]
+        alt tracker connected
             Tracker -> Tracker: checkDatabase(packageName-version)
             activate Tracker
-            alt [tracker has peers]
+            alt tracker has peers
                 Tracker --> Daemon: peerList
                 deactivate Tracker
 
-                loop [try peers in tracker order, skipping local blacklist, while file not downloaded]
-                Daemon -> Peer : establishConnection()
-                note right : Plain HTTP over TCP to the peer's\nadvertised IP:port (ADR-001: NAT traversal\npunted; QUIC hole-punching = stretch goal).\nConnection timeout (e.g. NATed peer) →\ntry next peer; the loop covers it.
+                loop try peers in tracker order, skipping local blacklist, while file not downloaded
+                Daemon -> Daemon : expectedHash, expectedSize = repoDB(packageName-version)
+                note right : Both read from the SAME row of pkg's\nrepository DB (read-only access):\ncksum and pkgsize. The facade has already\n404'd if that row is missing, so the fetch\npath always has both.
+
+                Daemon -> Peer : GET /pkg/packageName-version
+                note right : Plain HTTP over TCP to the peer's\nadvertised IP:port (ADR-001: NAT traversal\npunted; QUIC hole-punching = stretch goal).\nDial 5s, response headers 10s, body\nunbounded — a slow multi-GB transfer is\nlegitimate. Connection timeout (e.g. NATed\npeer) → try next peer; the loop covers it.\nSee docs/peer-transfer-spec-v0.2.md
                 activate Peer
-                Daemon -> Peer : requestPackage(packageName-version)
-                Peer --> Daemon : packageBytes (streaming, to temp buffer)
+                Peer --> Daemon : 200 + packageBytes, or 404 / 400 / 405
                 deactivate Peer
 
-                Daemon -> Daemon : computeHash(tempBytes)
-                note right : Expected hash read from pkg's\nrepository DB (read-only access)
+                Daemon -> Daemon : stream body → temp file, hashing as it goes
+                note right : io.Copy through a MultiWriter into\nos.CreateTemp(temp_dir), bounded by\nexpectedSize. Nothing above the copy\nbuffer is ever resident, so package size\nis not limited by RAM. No global size cap:\nthe repo DB size IS the bound.
 
-                alt [hash matches]
-                Daemon --> pkg : packageBytes (served as mirror response)
+                alt size and hash match
+                Daemon --> pkg : temp file streamed out as mirror response, then removed
                 pkg -> pkg : verifyHash + save to pkg cache
                 pkg -> pkg : install(packageName-version)
                 pkg --> User : success
@@ -54,19 +56,19 @@ else [package name is valid]
                 Daemon -> Daemon : cacheWatcher detects new package
                 note right : Triggers announce (UC-05).\nSame mechanism covers packages\nacquired via ordinary mirrors,\nkeeping them seedable too.
 
-                else [hash mismatch (corrupt / tampered)]
-                Daemon -> Daemon : discardTempBytes()
+                else size or hash mismatch, or non-200 reply
+                Daemon -> Daemon : removeTempFile()
                 Daemon -> Daemon : markPeerUntrusted(peer)
-                note right : Local blacklist only.\nSelect next peer and retry.\nIf all peers exhausted →\nHTTP error so pkg falls\nback to next mirror.
+                note right : Only a size or hash mismatch\nblacklists — a 404 means the peer\nno longer holds it, not that it lied.\nLocal blacklist only.\nSelect next peer and retry.\nIf all peers exhausted →\nHTTP error so pkg falls\nback to next mirror.
                 end
                 end
 
-            else [tracker has no peer]
+            else tracker has no peer
                 Tracker --> Daemon: empty
                 deactivate Tracker
                 Daemon --> pkg : HTTP error → pkg tries next mirror
             end
-        else [tracker unreachable]
+        else tracker unreachable
             Daemon -> Daemon : No response from tracker after a few seconds
             Daemon --> pkg : HTTP error → pkg tries next mirror
         end

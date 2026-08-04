@@ -1,6 +1,6 @@
 // Command demo runs a live peer-to-peer transfer in one process: a seeder
 // serves a package, a downloader fetches it over a real TCP connection, and
-// the bytes are verified against their CID
+// the bytes are verified against the expected hash.
 // Run with:  go run ./cmd/demo
 package main
 
@@ -35,7 +35,7 @@ func main() {
 	go seeder.Serve(ln)
 	time.Sleep(100 * time.Millisecond)
 
-	// 3. Download from the seeder and verify (fetch side, UC-04)
+	// 3. Download from the seeder and verify (fetch side, UC-02)
 	got, err := peer.FetchFromPeer(ln.Addr().String(), nameVersion, hash)
 	if err != nil {
 		log.Fatalf("fetch failed: %v", err)
