@@ -6,7 +6,8 @@ import (
 	"time"
 )
 
-// discovery.Client will satisfy this once wire spec v0.2 lands.
+// Tracker is the one-shot half of the tracker conversation. *Client satisfies
+// it; the compile-time assertion is in client.go.
 type Tracker interface {
 	Ping() error // ErrUnknownPeer if forgotten
 	Announce(port int, packages []string) error

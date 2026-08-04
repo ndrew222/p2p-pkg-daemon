@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/peer"
@@ -89,6 +91,38 @@ func TestPackageRequest(t *testing.T) {
 		// Traversal must not smuggle All into the parent position.
 		{"traversal", "/All/../etc/passwd", "", false},
 		{"traversal to All", "/foo/../All/nginx-1.24.0_2.pkg", "nginx-1.24.0_2", true},
+
+		// What pkg 2.7.5 actually requests, measured on FreeBSD
+		// 15.1-RELEASE-p1. The Hashed/ level and the ~hash10 suffix are
+		// both present, and the earlier rule 404'd every one of these.
+		{
+			"pkg 2.7.5 hashed request",
+			"/stable/FreeBSD:15:amd64/latest/All/Hashed/indexinfo-0.3.1_1~ae9dce33aa.pkg",
+			"indexinfo-0.3.1_1", true,
+		},
+		{"hashed without suffix", "/latest/All/Hashed/curl-8.6.0.pkg", "curl-8.6.0", true},
+		{"suffix without Hashed", "/latest/All/curl-8.6.0~0123456789.pkg", "curl-8.6.0", true},
+		{
+			"hashed hyphenated name",
+			"/All/Hashed/py311-setuptools-63.1.0~abcdef0123.pkg",
+			"py311-setuptools-63.1.0", true,
+		},
+
+		// The suffix rule is exactly 10 lowercase hex after a tilde.
+		// Anything else is part of the version, not a checksum, and must
+		// not be silently eaten.
+		{"suffix too short", "/All/curl-8.6.0~abc.pkg", "curl-8.6.0~abc", true},
+		{"suffix not hex", "/All/curl-8.6.0~zzzzzzzzzz.pkg", "curl-8.6.0~zzzzzzzzzz", true},
+		{"suffix uppercase", "/All/curl-8.6.0~ABCDEF0123.pkg", "curl-8.6.0~ABCDEF0123", true},
+
+		// Hashed is tolerated directly under All and nowhere else.
+		{"Hashed without All", "/latest/Hashed/curl-8.6.0.pkg", "", false},
+		{"Hashed too deep", "/All/Hashed/more/curl-8.6.0.pkg", "", false},
+		{"Hashed directory itself", "/All/Hashed/", "", false},
+
+		// A repo directory that happens to be named All does not displace
+		// the real one: the last All wins.
+		{"repo named All", "/All/latest/All/curl-8.6.0.pkg", "curl-8.6.0", true},
 	}
 
 	for _, tc := range tests {
@@ -311,6 +345,61 @@ func TestFacadeOverRealHTTP(t *testing.T) {
 	defer metaResp.Body.Close()
 	if metaResp.StatusCode != http.StatusNotFound {
 		t.Errorf("meta.conf status = %d, want 404", metaResp.StatusCode)
+	}
+}
+
+// UC-02 §8: a download is spooled through temp_dir, and the buffer is
+// per-request -- nothing may be left behind for the next one to find.
+func TestFacadeSpoolsThroughTempDirAndCleansUp(t *testing.T) {
+	const pkgName = "nginx-1.24.0_2"
+	content := []byte("package bytes")
+	tempDir := t.TempDir()
+
+	f := &Facade{
+		Peers:   fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
+		Hashes:  fakeHashes{pkgName: sha256Hex(content)},
+		TempDir: tempDir,
+	}
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/latest/All/nginx-1.24.0_2.pkg", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != string(content) {
+		t.Errorf("body = %q, want %q", got, content)
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("temp_dir still holds %v; the buffer must not outlive the request", names)
+	}
+}
+
+// An unwritable temp_dir is a daemon-side failure, not a missing package: pkg
+// must see a 5xx so it falls through to a real mirror rather than concluding
+// the file does not exist.
+func TestFacadeUnwritableTempDirIs500(t *testing.T) {
+	const pkgName = "nginx-1.24.0_2"
+	content := []byte("package bytes")
+
+	f := &Facade{
+		Peers:   fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
+		Hashes:  fakeHashes{pkgName: sha256Hex(content)},
+		TempDir: filepath.Join(t.TempDir(), "does-not-exist"),
+	}
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/latest/All/nginx-1.24.0_2.pkg", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
 

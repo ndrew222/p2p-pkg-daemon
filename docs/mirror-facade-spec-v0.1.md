@@ -1,14 +1,20 @@
 # Mirror Facade Spec — v0.1
 
-*The pkg↔daemon HTTP surface (UC-02, UC-07). This is a separate wire from the
-tracker protocol: `tracker-protocol-spec-v0.2.md` governs daemon↔tracker and
-says nothing about this surface.*
+*The pkg↔daemon HTTP surface (UC-02, UC-07). This is one of three separate
+wires: `tracker-protocol-spec-v0.2.md` governs daemon↔tracker and
+`peer-transfer-spec-v0.2.md` governs daemon↔daemon. Neither says anything about
+this surface, and the path rule below is **not** shared with either — the peer
+wire uses its own `/pkg/<name-version>` namespace precisely so that a seeding
+daemon is not a syntactically valid pkg mirror.*
 
 **Status: drafted by an implementing agent at the spec owner's instruction, not
-by the spec owner.** The path rule below is derived from one worked example
-supplied by the owner; the status codes were chosen by the implementer because
-the use cases specify only "an HTTP error". Both are open to revision — treat
-this as a record of what the code does, not as a ratified contract.
+by the spec owner.** The status codes were chosen by the implementer because
+the use cases specify only "an HTTP error", and remain open to revision — treat
+those as a record of what the code does, not as a ratified contract.
+
+The **path rule is ratified.** It began as a generalisation from one worked
+example; the `Hashed/` level and the `~hash10` suffix were then measured
+against pkg 2.7.5 and the corrected rule was accepted by the owner.
 
 ## What the facade is
 
@@ -44,21 +50,48 @@ daemon therefore receives the **path** portion:
 
 A request is a **package-file request** if and only if, after path cleaning:
 
-1. the second-to-last path segment is exactly `All`, **and**
+1. some path segment is exactly `All`, and what follows it is either the file
+   itself or the single segment `Hashed` and then the file, **and**
 2. the last segment ends in `.pkg`, **and**
-3. stripping `.pkg` leaves a valid `name-version` string — a final hyphen
-   separating a non-empty name from a version that starts with a digit
-   (the same rule the cache watcher applies to cache filenames).
+3. stripping `.pkg`, and then a trailing `~[0-9a-f]{10}`, leaves a valid
+   `name-version` string — a final hyphen separating a non-empty name from a
+   version that starts with a digit (the same rule the cache watcher applies to
+   cache filenames).
 
-The package identifier is the last segment with `.pkg` removed —
-`gopls-0.22.0_1` above. **Everything before `All/` is ignored**: the repo path
-varies per mirror, per ABI and per branch, and carries no information the
-daemon needs. The daemon matches on the tail, not the prefix.
+Where more than one segment is `All`, the **last** one wins, so a repository
+that happens to be named `All` cannot displace the real one.
+
+The package identifier is the last segment with `.pkg` and any `~hash10`
+removed — `gopls-0.22.0_1` above. **Everything before `All/` is ignored**: the
+repo path varies per mirror, per ABI and per branch, and carries no information
+the daemon needs. The daemon matches on the tail, not the prefix.
 
 Anything that fails the rule is a **non-package request** (UC-07): `meta.conf`,
 `packagesite.pkg`, `data.pkg`, directory listings, `/`, and anything else. Note
 that `packagesite.pkg` ends in `.pkg` but does not sit under `All/`, which is
 precisely why condition 1 is load-bearing.
+
+### Why `Hashed/` and `~hash10`
+
+Both were measured against FreeBSD 15.1-RELEASE-p1 / pkg 2.7.5, not inferred.
+`pkg -d fetch -y -o /tmp/jmjprobe indexinfo` requests:
+
+```
+/…/All/Hashed/indexinfo-0.3.1_1~ae9dce33aa.pkg
+```
+
+and the repository database's `path` column agrees:
+`All/Hashed/<name>-<version>~<hash10>.pkg`, where `hash10` is the first 10
+characters of `cksum`.
+
+An earlier revision of this rule required `All` to be the *second-to-last*
+segment. Every real fetch from pkg 2.7.5 therefore failed condition 1, was
+classified as metadata, and answered `404` — the daemon was a no-op against a
+live repository. The rule above is the ratified fix.
+
+The suffix match is deliberately narrow — exactly ten lowercase hex digits
+after a tilde. A tilde is legal in a pkg version, so a looser rule would eat
+part of a real version string and produce an identifier no peer holds.
 
 The signed catalog is the root of the integrity model and must always come from
 a real mirror. The daemon never serves, caches or proxies metadata.
@@ -124,19 +157,40 @@ expiry (nothing specifies one). See `docs/logs/claude-peer-blacklist.md`.
 
 ## Open questions — not resolved here
 
-1. **`HEAD` requests.** Currently `405`. The facade cannot answer a `HEAD`
-   honestly without performing the whole fetch (it does not know the size until
-   it has the bytes), and answering dishonestly risks pkg believing a size it
-   will not receive. Whether pkg issues `HEAD` against mirrors at all must be
-   settled by the UC-07 integration smoke test.
-2. **Hash format.** The facade asks the repository database for a hex SHA-256
-   string, matching the assumption already isolated in `internal/peer/fetch.go`.
-   Unratified.
+1. **`HEAD` requests.** Currently `405`. The stated objection was that the
+   facade cannot answer a `HEAD` honestly without performing the whole fetch,
+   because it does not know the size until it has the bytes. That premise no
+   longer holds: `packages.pkgsize` gives the exact size from the same
+   repository-database row as the hash, and `peer-transfer-spec-v0.2.md` relies
+   on it. The facade could therefore answer `HEAD` truthfully without fetching
+   anything. Still **open**, because the remaining question — whether pkg
+   issues `HEAD` against mirrors at all, and what it does with the answer — is
+   for the UC-07 integration smoke test, not for this spec.
+2. **Hash format.** ~~The facade asks the repository database for a hex SHA-256
+   string, matching the assumption already isolated in
+   `internal/peer/fetch.go`. Unratified.~~ **Resolved empirically:**
+   `packages.cksum` is the lowercase hex SHA-256 of the `.pkg` file. All 37,835
+   rows on the inspected host are 64 lowercase hex, verified byte-for-byte
+   against three cached files. Residual risk: one repository, one ABI —
+   `pkg_format_version` and `manifestdigest` exist in the schema and have not
+   been investigated.
 3. **Repository database access.** No reader exists. The facade depends on the
    `PackageHashes` interface and is wired with a `nil` implementation until one
    lands, in which case every package-file request answers `404`.
-4. **Temp buffer.** UC-02 §8 calls for streaming into the configured buffer
+4. **Temp buffer.** ~~UC-02 §8 calls for streaming into the configured buffer
    directory. The current fetch path buffers in memory, so `BufferDir` is
-   unused by the facade. Fixing this is a change to `internal/peer`, not here.
+   unused by the facade.~~ **Resolved** by `peer-transfer-spec-v0.2.md`: the
+   fetch path streams into `os.CreateTemp` under a configurable temp directory
+   and hashes incrementally, and `peer.FetchFromPeer` returns the open file
+   rather than a byte slice. The facade copies that file to pkg and removes it.
+   A `[]byte` return would have silently reintroduced whole-package residency
+   at this layer, which is why the signature change matters here and not only
+   in `internal/peer`.
+
+   The facade now spools through `config.TempDir` and removes the file after
+   serving, so the temp directory is wired and the cleanup path is tested. The
+   memory saving is **not** yet realised: `peer.FetchFromPeer` still returns a
+   `[]byte`, so the whole package is resident before the spool begins. That
+   half arrives with the peer wire migration.
 5. **Range requests.** pkg may issue them for resumed downloads. Unhandled;
    the facade ignores `Range` and returns the whole file with `200`.
