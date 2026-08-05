@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"database/sql"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +24,24 @@ type fixtureRow struct {
 }
 
 func hash64(c byte) string { return strings.Repeat(string(c), 64) }
+
+// captureLog redirects the standard logger for the duration of one test and
+// returns the accumulated output. The reader reports collisions and dropped
+// rows only to the log -- they are diagnostics, not values a caller acts on --
+// so the log is the only place a test can observe them.
+func captureLog(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	flags := log.Flags()
+	out := log.Writer()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(out)
+		log.SetFlags(flags)
+	})
+	return buf.String
+}
 
 // writeRepoDB creates <dir>/<repo>/db with the subset of pkg's schema the
 // reader depends on. The extra columns are present because the real table has
@@ -157,17 +178,23 @@ func TestOpenRepositoriesSkipsMalformedRows(t *testing.T) {
 	}
 }
 
-// Deterministic, and the count is logged. UNRATIFIED: the owner may prefer
-// refusing to start. Measured zero collisions across both repositories on the
-// reference host.
+// Ratified: first repository in sorted path order wins, deterministically, and
+// the colliding names are logged so a wrong pick is diagnosable. Measured zero
+// collisions across both repositories on the reference host.
 func TestCollisionResolvesToFirstPathInOrder(t *testing.T) {
 	dir := t.TempDir()
 	writeRepoDB(t, dir, "aaa-first", []fixtureRow{{"dup", "1.0", 111, hash64('a')}})
 	writeRepoDB(t, dir, "zzz-second", []fixtureRow{{"dup", "1.0", 222, hash64('b')}})
 
+	logged := captureLog(t)
 	repo, err := OpenRepositories(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Naming the collision is the whole diagnostic: a wrong pick blacklists
+	// an honest peer, and the log is the only thread back to why.
+	if out := logged(); !strings.Contains(out, "dup-1.0") {
+		t.Errorf("collision log does not name the colliding package; got:\n%s", out)
 	}
 	gotHash, _ := repo.ExpectedHash("dup-1.0")
 	if gotHash != hash64('a') {
@@ -175,6 +202,31 @@ func TestCollisionResolvesToFirstPathInOrder(t *testing.T) {
 	}
 	if got, _ := repo.ExpectedFileSizeBytes("dup-1.0"); got != 111 {
 		t.Errorf("ExpectedFileSizeBytes(dup-1.0) = %d, want 111 from the same row as the hash", got)
+	}
+}
+
+// One misconfigured repository can shadow ports wholesale, so the diagnostic
+// has to stay a diagnostic rather than dumping 38,000 names into the log.
+func TestCollisionLogIsCapped(t *testing.T) {
+	dir := t.TempDir()
+	var rows []fixtureRow
+	for i := 0; i < logNameLimit+5; i++ {
+		rows = append(rows, fixtureRow{fmt.Sprintf("dup%02d", i), "1.0", 10, hash64('a')})
+	}
+	writeRepoDB(t, dir, "aaa-first", rows)
+	writeRepoDB(t, dir, "zzz-second", rows)
+
+	logged := captureLog(t)
+	if _, err := OpenRepositories(dir); err != nil {
+		t.Fatal(err)
+	}
+	out := logged()
+	if !strings.Contains(out, "and 5 more") {
+		t.Errorf("collision log is not capped with an \"and N more\" tail; got:\n%s", out)
+	}
+	// The tail replaces the surplus names, it does not merely follow them.
+	if strings.Contains(out, "dup14-1.0") {
+		t.Errorf("collision log names a package past the cap; got:\n%s", out)
 	}
 }
 

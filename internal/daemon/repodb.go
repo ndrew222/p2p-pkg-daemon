@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	// Pure Go, so `go build ./...` and `go test ./...` need no C toolchain
@@ -82,7 +83,7 @@ func (r *Repositories) Reload() error {
 	}
 
 	rows := make(map[string]repoRow)
-	var collisions int
+	var collisions []string
 	for _, path := range paths {
 		loaded, skipped, err := loadRepositoryDatabase(path)
 		if err != nil {
@@ -98,20 +99,40 @@ func (r *Repositories) Reload() error {
 		}
 		for nameVersion, row := range loaded {
 			if _, dup := rows[nameVersion]; dup {
-				// First repository wins, in sorted path order, so the
-				// outcome is at least deterministic. Measured: zero
-				// collisions across both repositories on the reference
-				// host (37,835 and 239 rows). UNRATIFIED -- see the work
-				// log; the owner may prefer refusing to start.
-				collisions++
+				// Ratified: the first repository in sorted path order
+				// wins, deterministically, and the colliding names are
+				// logged. Measured: zero collisions across both
+				// repositories on the reference host (37,835 and 239
+				// rows).
+				//
+				// The choice cannot be delegated to pkg even though pkg
+				// has repository priority and has already picked a row
+				// before it calls us: the facade needs an expected hash
+				// *before* it fetches, and there is no "ask pkg" step.
+				// Nor can the swarm disambiguate -- the tracker announces
+				// a bare name-version and the peer namespace is
+				// /pkg/<name-version> by design, so a peer holding a
+				// colliding name-version cannot say which file it has.
+				//
+				// Picking wrong degrades to a failed install, never a
+				// corrupt one, because UC-02 step 10 has pkg re-verify
+				// the bytes we hand over. The one consequence that covers
+				// is that a wrong row makes us blacklist an *honest* peer
+				// for our own bad data -- which is why the names are
+				// logged, and why first-wins beats refusing to start: the
+				// downside is bounded and diagnosable, whereas refusing
+				// lets one misconfigured third-party repository take the
+				// daemon down.
+				collisions = append(collisions, nameVersion)
 				continue
 			}
 			rows[nameVersion] = row
 		}
 		log.Printf("daemon: loaded %d package(s) from %s", len(loaded), path)
 	}
-	if collisions > 0 {
-		log.Printf("daemon: %d name-version(s) appear in more than one repository; the first in path order won", collisions)
+	if len(collisions) > 0 {
+		log.Printf("daemon: %d name-version(s) appear in more than one repository; the first in path order won: %s",
+			len(collisions), namesForLog(collisions))
 	}
 
 	r.mu.Lock()
@@ -218,6 +239,25 @@ func readOnlyDSN(path string) string {
 		RawQuery: "mode=ro&_pragma=query_only(1)",
 	}
 	return u.String()
+}
+
+// logNameLimit bounds how many name-versions one diagnostic log line names
+// before it summarises the rest. The lists it caps are unbounded in the bad
+// case -- a misconfigured third-party repository can shadow ports wholesale,
+// and a corrupt catalogue can drop every row it has -- and a log line naming
+// 38,000 packages is not a diagnostic, it is a way of losing the rest of the
+// log.
+const logNameLimit = 10
+
+// namesForLog renders keys as a sorted, comma-separated list of at most
+// logNameLimit entries with an "and N more" tail. It sorts keys in place;
+// every caller passes a slice it owns.
+func namesForLog(keys []string) string {
+	sort.Strings(keys)
+	if len(keys) <= logNameLimit {
+		return strings.Join(keys, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(keys[:logNameLimit], ", "), len(keys)-logNameLimit)
 }
 
 // isHexSHA256 reports whether s is exactly 64 lowercase hex digits.
