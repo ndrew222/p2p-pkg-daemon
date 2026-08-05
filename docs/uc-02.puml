@@ -47,7 +47,7 @@ else package name is valid
                 Daemon -> Daemon : stream body → temp file, hashing as it goes
                 note right : io.Copy through a MultiWriter into\nos.CreateTemp(temp_dir), bounded by\nexpectedSize. Nothing above the copy\nbuffer is ever resident, so package size\nis not limited by RAM. No global size cap:\nthe repo DB size IS the bound.
 
-                alt size and hash match
+                alt within the size bound and hash matches
                 Daemon --> pkg : temp file streamed out as mirror response, then removed
                 pkg -> pkg : verifyHash + save to pkg cache
                 pkg -> pkg : install(packageName-version)
@@ -56,10 +56,10 @@ else package name is valid
                 Daemon -> Daemon : cacheWatcher detects new package
                 note right : Triggers announce (UC-05).\nSame mechanism covers packages\nacquired via ordinary mirrors,\nkeeping them seedable too.
 
-                else size or hash mismatch, or non-200 reply
+                else hash mismatch, size breach, or non-200 reply
                 Daemon -> Daemon : removeTempFile()
-                Daemon -> Daemon : markPeerUntrusted(peer)
-                note right : Only a size or hash mismatch\nblacklists — a 404 means the peer\nno longer holds it, not that it lied.\nLocal blacklist only.\nSelect next peer and retry.\nIf all peers exhausted →\nHTTP error so pkg falls\nback to next mirror.
+                Daemon -> Daemon : markPeerUntrusted(peer), on hash mismatch only
+                note right : Only a HASH mismatch blacklists.\nA size breach (Content-Length disagrees,\nor the body overruns expectedSize)\nabandons the peer without blacklisting:\nwrong-length bytes fail the hash anyway,\nso a size verdict is a second route to\nthe same answer. A 404 means the peer\nno longer holds it, not that it lied.\nLocal blacklist only.\nSelect next peer and retry.\nIf all peers exhausted →\nHTTP error so pkg falls\nback to next mirror.
                 end
                 end
 
