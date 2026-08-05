@@ -152,6 +152,12 @@ The bound therefore becomes **per-package and exact**:
 This is a strictly *stronger* anti-DoS bound than 64 MiB — a hostile peer cannot
 overrun by one byte — while removing the ceiling entirely.
 
+**Abandoning is not blacklisting.** A peer that breaches the size bound is
+dropped and the requester moves to the next holder; only a hash mismatch marks
+it locally (UC-02 §11c). The size is a bound, not a verdict — a body of the
+wrong length fails the hash anyway if read to completion, so a separate size
+verdict would be a second route to the same conclusion.
+
 **Invariant this depends on:** hash and size come from the same repository
 database row, so any package that reaches the fetch path has both. The facade
 already returns `404` when no expected hash is found, before any peer is

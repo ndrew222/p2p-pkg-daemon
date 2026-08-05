@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	// Pure Go, so `go build ./...` and `go test ./...` need no C toolchain
@@ -82,36 +83,66 @@ func (r *Repositories) Reload() error {
 	}
 
 	rows := make(map[string]repoRow)
-	var collisions int
+	var collisions []string
 	for _, path := range paths {
 		loaded, skipped, err := loadRepositoryDatabase(path)
 		if err != nil {
 			return fmt.Errorf("daemon: %s: %w", path, err)
 		}
-		if skipped > 0 {
-			// A row whose cksum is not a hex SHA-256 is worse than
-			// useless: the fetch path would compare peer bytes against
-			// it, never match, and blacklist an honest peer for our own
-			// bad data. Dropping the row means the package is simply not
-			// served, which is the correct failure.
-			log.Printf("daemon: %s: skipped %d row(s) with a malformed cksum", path, skipped)
+		// A row the daemon cannot trust is worse than useless: the fetch
+		// path would compare peer bytes against it, never match, and
+		// blacklist an honest peer for our own bad data. Dropping the row
+		// means the package is simply not served, which is the correct
+		// failure. Failing to start over it would be worse.
+		//
+		// The two causes are reported separately because they are
+		// different faults with different diagnoses, and a single
+		// "malformed cksum" message for a pkgsize problem sends the
+		// reader looking in the wrong column.
+		if n := len(skipped.badCksum); n > 0 {
+			log.Printf("daemon: %s: skipped %d row(s) whose cksum is not a lowercase hex SHA-256: %s",
+				path, n, namesForLog(skipped.badCksum))
+		}
+		if n := len(skipped.badPkgSize); n > 0 {
+			log.Printf("daemon: %s: skipped %d row(s) whose pkgsize is not positive: %s",
+				path, n, namesForLog(skipped.badPkgSize))
 		}
 		for nameVersion, row := range loaded {
 			if _, dup := rows[nameVersion]; dup {
-				// First repository wins, in sorted path order, so the
-				// outcome is at least deterministic. Measured: zero
-				// collisions across both repositories on the reference
-				// host (37,835 and 239 rows). UNRATIFIED -- see the work
-				// log; the owner may prefer refusing to start.
-				collisions++
+				// Ratified: the first repository in sorted path order
+				// wins, deterministically, and the colliding names are
+				// logged. Measured: zero collisions across both
+				// repositories on the reference host (37,835 and 239
+				// rows).
+				//
+				// The choice cannot be delegated to pkg even though pkg
+				// has repository priority and has already picked a row
+				// before it calls us: the facade needs an expected hash
+				// *before* it fetches, and there is no "ask pkg" step.
+				// Nor can the swarm disambiguate -- the tracker announces
+				// a bare name-version and the peer namespace is
+				// /pkg/<name-version> by design, so a peer holding a
+				// colliding name-version cannot say which file it has.
+				//
+				// Picking wrong degrades to a failed install, never a
+				// corrupt one, because UC-02 step 10 has pkg re-verify
+				// the bytes we hand over. The one consequence that covers
+				// is that a wrong row makes us blacklist an *honest* peer
+				// for our own bad data -- which is why the names are
+				// logged, and why first-wins beats refusing to start: the
+				// downside is bounded and diagnosable, whereas refusing
+				// lets one misconfigured third-party repository take the
+				// daemon down.
+				collisions = append(collisions, nameVersion)
 				continue
 			}
 			rows[nameVersion] = row
 		}
 		log.Printf("daemon: loaded %d package(s) from %s", len(loaded), path)
 	}
-	if collisions > 0 {
-		log.Printf("daemon: %d name-version(s) appear in more than one repository; the first in path order won", collisions)
+	if len(collisions) > 0 {
+		log.Printf("daemon: %d name-version(s) appear in more than one repository; the first in path order won: %s",
+			len(collisions), namesForLog(collisions))
 	}
 
 	r.mu.Lock()
@@ -169,12 +200,22 @@ func repositoryDatabases(dir string) ([]string, error) {
 	return paths, nil
 }
 
+// skippedRows names the rows loadRepositoryDatabase dropped, split by cause.
+// A row is attributed to the first cause it fails, so the two lists partition
+// the dropped rows rather than double-counting one that is malformed twice.
+type skippedRows struct {
+	badCksum   []string
+	badPkgSize []string
+}
+
 // loadRepositoryDatabase reads one catalogue into memory, returning the rows
-// and the number dropped for a malformed cksum.
-func loadRepositoryDatabase(path string) (map[string]repoRow, int, error) {
+// and the name-versions dropped, by cause.
+func loadRepositoryDatabase(path string) (map[string]repoRow, skippedRows, error) {
+	var skipped skippedRows
+
 	db, err := sql.Open("sqlite", readOnlyDSN(path))
 	if err != nil {
-		return nil, 0, fmt.Errorf("opening: %w", err)
+		return nil, skipped, fmt.Errorf("opening: %w", err)
 	}
 	defer db.Close()
 
@@ -183,26 +224,29 @@ func loadRepositoryDatabase(path string) (map[string]repoRow, int, error) {
 	// the watcher produce via parsePackageName.
 	rows, err := db.Query(`SELECT name, version, pkgsize, cksum FROM packages`)
 	if err != nil {
-		return nil, 0, fmt.Errorf("querying packages: %w", err)
+		return nil, skipped, fmt.Errorf("querying packages: %w", err)
 	}
 	defer rows.Close()
 
 	out := make(map[string]repoRow)
-	var skipped int
 	for rows.Next() {
 		var name, version, cksum string
 		var pkgsize int64
 		if err := rows.Scan(&name, &version, &pkgsize, &cksum); err != nil {
-			return nil, 0, fmt.Errorf("scanning packages: %w", err)
+			return nil, skipped, fmt.Errorf("scanning packages: %w", err)
 		}
-		if !isHexSHA256(cksum) || pkgsize <= 0 {
-			skipped++
-			continue
+		nameVersion := name + "-" + version
+		switch {
+		case !isHexSHA256(cksum):
+			skipped.badCksum = append(skipped.badCksum, nameVersion)
+		case pkgsize <= 0:
+			skipped.badPkgSize = append(skipped.badPkgSize, nameVersion)
+		default:
+			out[nameVersion] = repoRow{hash: cksum, size: pkgsize}
 		}
-		out[name+"-"+version] = repoRow{hash: cksum, size: pkgsize}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("reading packages: %w", err)
+		return nil, skipped, fmt.Errorf("reading packages: %w", err)
 	}
 	return out, skipped, nil
 }
@@ -218,6 +262,27 @@ func readOnlyDSN(path string) string {
 		RawQuery: "mode=ro&_pragma=query_only(1)",
 	}
 	return u.String()
+}
+
+// logNameLimit bounds how many name-versions one diagnostic log line names
+// before it summarises the rest. The lists it caps are unbounded in the bad
+// case -- a misconfigured third-party repository can shadow ports wholesale,
+// and a corrupt catalogue can drop every row it has -- and a log line naming
+// 38,000 packages is not a diagnostic, it is a way of losing the rest of the
+// log.
+const logNameLimit = 10
+
+// namesForLog renders keys as a sorted, comma-separated list of at most
+// logNameLimit entries with an "and N more" tail. It sorts a copy: rendering a
+// diagnostic is not a reason to reorder the caller's slice, and a caller that
+// later reported a count from the same slice would be reading a reordered one.
+func namesForLog(keys []string) string {
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	if len(sorted) <= logNameLimit {
+		return strings.Join(sorted, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(sorted[:logNameLimit], ", "), len(sorted)-logNameLimit)
 }
 
 // isHexSHA256 reports whether s is exactly 64 lowercase hex digits.

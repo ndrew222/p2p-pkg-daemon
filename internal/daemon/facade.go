@@ -63,8 +63,9 @@ type PackageHashes interface {
 
 // Facade serves pkg. Peers resolves who holds a package (the tracker client);
 // Repo supplies the expected hash and size from pkg's repository database. A
-// nil Repo means the repository database is not wired up yet, and every package
-// request answers 404.
+// nil Repo answers 404 to every package request, which is why Check rejects it
+// and the daemon refuses to start rather than serving a silent stream of 404s;
+// the handler's own nil guard is for a Facade built directly, in tests.
 //
 // Blacklist is the daemon's local record of peers that have served corrupt
 // bytes (UC-02 §11c). It lives on the facade rather than per request precisely
@@ -301,10 +302,11 @@ var ErrNoRepositoryDatabase = errors.New("daemon: no repository database configu
 // ListenAndServe runs the facade on addr, which is config.FacadeAddr --
 // loopback, enforced by config.ValidateFields.
 //
-// Still NOT wired into Daemon.startHTTPServerLocked, but the reason has
-// changed: the missing config field exists now, and what remains is Check
-// failing without a repository database, which nothing implements yet.
-// Mounting it is one call once that lands.
+// The daemon does not use this: Daemon.startHTTPServerLocked mounts the facade
+// on its own http.Server so that shutdown is controllable, which
+// http.ListenAndServe does not allow. This is the standalone entry point --
+// convenient for a facade run on its own, and it keeps the Check-before-listen
+// order in one obvious place.
 func (f *Facade) ListenAndServe(addr string) error {
 	if err := f.Check(); err != nil {
 		return err
