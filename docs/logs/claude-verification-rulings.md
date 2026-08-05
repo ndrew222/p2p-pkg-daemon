@@ -1,61 +1,77 @@
-# Verification rulings — plan, not yet implemented
+# Verification rulings — work log
 
-**Status: PLANNED. No code or document in this commit has been changed to match
-it.** This file records four owner rulings and the change they imply, so the
-next session can execute them without re-deriving the reasoning. Delete this
-banner and rewrite the file as an ordinary work log once the work lands.
+Four items had been flagged to the owner in `HANDOFF.md` and left unanswered:
+§4.3's riders on cross-repository collisions and malformed rows, and §5.5's
+leftovers on blacklist expiry, persistence and scope — plus the observation
+that UC-02's "a size or hash mismatch blacklists" was unreachable in code,
+because the fetch path only ever raises `ErrHashMismatch`. The owner ruled on
+all four. This log records the rulings, how they were implemented, and what is
+still open.
 
-## Why this exists
+An earlier revision of this file was a *plan*, written when the rulings had
+been obtained but not yet executed. The work has since landed; this is the
+work log that replaces it.
 
-Four items were flagged to the owner in `HANDOFF.md` and left unanswered: the
-§4.3 riders on cross-repository collisions and malformed rows, and the §5.5
-leftovers on blacklist expiry, persistence and scope — plus the observation that
-UC-02's "a size or hash mismatch blacklists" is unreachable in code, because the
-fetch path only ever raises `ErrHashMismatch`. The owner has now ruled on all
-four.
+## How I approached it
 
-A fifth thing surfaced while answering a question about what the "seed server"
-is, and is reported here rather than fixed. See the last section.
+The rulings were already written down and reasoned through, so the work was
+execution rather than design. I kept the commits atomic in the order the
+dependencies ran, not the order the rulings were numbered:
 
-## The rulings
+1. `repodb`: collisions — introduces the capped log helper.
+2. `repodb`: malformed rows — reuses it.
+3. `peer`: the blacklist's three legs.
+4. `docs`: size bounds, hash verifies.
+5. `facade`: the stale wiring comment.
+6. This log and `HANDOFF.md`.
 
-### 1. Verification blacklists on hash mismatch only
+Collisions came first only because ruling 3 is where the "and N more" cap is
+specified, and ruling 4's dropped-row lists need the same cap. Doing it the
+other way round would have introduced the helper in the commit that did not
+ask for it.
+
+## Ruling 1 — verification blacklists on hash mismatch only
 
 The expected size stays, but only as a **transfer bound**. It is no longer a
 verdict.
 
-The distinction matters because `pkgsize` was doing two jobs. As a bound it is
-load-bearing: UC-02's assumptions argue there is no fixed package size limit
-precisely because the exact expected size is a tighter anti-abuse bound than any
-constant, and §4.2 expects hostile peers. Dropping it entirely would leave the
-fetch path with no defence against a peer streaming unbounded bytes. As a
-*verdict* it earns nothing: a body of the wrong length fails the hash anyway if
-read to completion, so a separate size trigger is a second route to the same
-conclusion and a second thing to keep consistent across three documents.
+`pkgsize` was doing two jobs. As a bound it is load-bearing: UC-02's
+assumptions argue there is no fixed package size limit precisely because the
+exact expected size is a tighter anti-abuse bound than any constant, and §4.2
+expects hostile peers — dropping it would leave the fetch path with no defence
+against a peer streaming unbounded bytes. As a *verdict* it earns nothing: a
+body of the wrong length fails the hash anyway if read to completion, so a
+separate size trigger is a second route to the same conclusion and a second
+thing to keep consistent across three documents.
 
-So: a `Content-Length` that disagrees with the expected size, or a body that
+So a `Content-Length` that disagrees with the expected size, or a body that
 overruns it, **abandons the peer and moves to the next holder**. It does not
 blacklist. Only `ErrHashMismatch` blacklists, because only a hash mismatch is
 evidence the peer sent bytes that are wrong rather than bytes that are not the
-ones we asked for. A `404` continues not to blacklist — it means the peer no
-longer holds the file, not that it lied.
+ones we asked for. A `404` continues not to blacklist.
 
-`docs/peer-transfer-spec-v0.2.md` §"The size bound" already specifies exactly
-this mechanism (abandon on `Content-Length` mismatch before reading a byte; read
-through `io.LimitReader(body, expectedSize+1)`). It needs one sentence saying
-that abandoning is not blacklisting. The conflict is confined to UC-02.
+**Changed:** `docs/use-case-descriptions.md` steps 9, 9c, 11c and the UC-02
+assumptions cell; one clarifying sentence in `docs/peer-transfer-spec-v0.2.md`
+§"The size bound", which already specified the mechanism and needed only the
+statement that abandoning is not blacklisting.
 
-**Changes:** `docs/use-case-descriptions.md` steps 9, 9c, 11c and the UC-02
-assumptions cell — size bounds, hash verifies, rationale stated inline at 11c
-because that is the cell a reader lands on. One clarifying sentence in
-`docs/peer-transfer-spec-v0.2.md`. No code: the read cap arrives with the
-streaming rewrite in §5.3, and `peerwire.MaxPayload` must stay until then or the
-fetch path is left with no bound at all.
+**Also changed, and not in the plan:** `docs/uc-02.puml` carried the same
+conflation in its `alt` label and in the note beside `markPeerUntrusted`. The
+plan listed only the prose. Leaving the diagram saying "only a size or hash
+mismatch blacklists" would have left the contradiction exactly where AGENTS.md
+says the diagrams are authoritative — where the prose is ambiguous — so it was
+corrected in the same commit. Rendered to PNG and inspected before committing,
+per the trap in §8 about `alt` labels eating the first word after a square
+bracket and angle brackets being parsed as markup. Neither bit.
 
-### 2. The blacklist is per-peer, unexpiring, unpersisted, culled by restart
+**No code changed.** The read cap arrives with the streaming rewrite in §5.3,
+and `peerwire.MaxPayload` must stay until then or the fetch path is left with
+no bound at all.
+
+## Ruling 2 — the blacklist is per-peer, unexpiring, unpersisted, culled by restart
 
 All three of §5.5's "left deliberately undecided" positions are ratified as the
-code already has them, and the third leg is now explicit: the key is the **peer
+code already had them, and the third leg is now explicit: the key is the **peer
 address**, so a peer that serves corrupt bytes is distrusted for *everything*.
 Corrupt bytes are evidence about the peer, not about one file.
 
@@ -64,25 +80,24 @@ complete cull. No `Unblock` exists and none is planned: something would have to
 call it, and an admin surface is in no spec — adding one would trip AGENTS.md
 ground rule 2.
 
-What the ruling does require is that the log show what a restart would clear.
-`internal/peer/download.go` already logs the address and the package on every
-`Block`; nothing ever reports the list as a whole, and `Blacklist.Addrs()` —
-written "for logging and tests" — has no caller.
+What the ruling required beyond recording the decision is that the log show
+what a restart would clear. `internal/peer/download.go` already logged the
+address and the package on every `Block`, but nothing reported the list as a
+whole, and `Blacklist.Addrs()` — written "for logging and tests" — had no
+caller. It has one now, rather than a new accessor.
 
-**Changes:** rewrite the UNSPECIFIED block in `internal/peer/blacklist.go` as a
-ratified decision covering all three legs plus the cull story. Extend the
-existing blacklist log line in `internal/peer/download.go` to report the
-resulting list size, reusing `Addrs()` rather than adding an accessor.
+**Changed:** the `UNSPECIFIED` block in `internal/peer/blacklist.go` became a
+ratified decision covering all three legs and the cull story; the `Block` log
+line in `internal/peer/download.go` now reports the resulting list.
 
-### 3. Cross-repository collisions: first-wins, and name them
+## Ruling 3 — cross-repository collisions: first-wins, and name them
 
 Ratified as implemented — first repository in sorted path order wins,
-deterministically — with one addition: log **which** name-versions collided, not
-just how many. Cap the list with an "and N more" tail in case a misconfigured
-third-party repository shadows ports wholesale.
+deterministically — with one addition: log **which** name-versions collided,
+not just how many, capped with an "and N more" tail.
 
-**Why this is not pkg's problem to solve**, since it is the first thing the next
-reader will ask. pkg does have repository priority (`PRIORITY` in
+**Why this is not pkg's problem to solve**, since it is the first thing the
+next reader will ask. pkg does have repository priority (`PRIORITY` in
 `repos/*.conf`) and has already chosen a row before it calls the facade, and
 UC-02 step 10 has pkg **re-verify** the bytes against that row after we hand
 them over. A wrong pick therefore degrades to a failed install, never a corrupt
@@ -91,62 +106,137 @@ one.
 But the choice cannot be delegated. The facade needs an expected hash *before*
 it fetches, so it must pick some row, and there is no "ask pkg" step available.
 More fundamentally, the swarm has no repository dimension at all: the tracker
-announces bare `name-version` and the peer namespace is `/pkg/<name-version>` by
-design (§8), so peers holding a colliding name-version cannot say which of the
-two files they have. Recovering repository identity from the request URL prefix
-would mean parsing pkg's `repos/*.conf` — a surface in no spec — and §4.3
-already decided repository identity is hidden because no consumer needed it.
+announces bare `name-version` and the peer namespace is `/pkg/<name-version>`
+by design (§8), so peers holding a colliding name-version cannot say which of
+the two files they have. Recovering repository identity from the request URL
+prefix would mean parsing pkg's `repos/*.conf` — a surface in no spec — and
+§4.3 already decided repository identity is hidden because no consumer needed
+it.
 
 The one consequence pkg's re-verification does not cover: a wrong row makes us
-blacklist an **honest** peer for our own bad data. That is the same asymmetric
-failure the malformed-row rule guards against, it is why the colliding names
-belong in the log, and it is why first-wins beats refuse-to-start — the downside
-is bounded and diagnosable, whereas refusing to start lets one misconfigured
-third-party repository take the daemon down.
+blacklist an **honest** peer for our own bad data. That is why the colliding
+names belong in the log, and why first-wins beats refuse-to-start — the
+downside is bounded and diagnosable, whereas refusing to start lets one
+misconfigured third-party repository take the daemon down.
 
-**Changes:** `internal/daemon/repodb.go` `Reload` — collect and log the
-colliding keys; delete the `UNRATIFIED` comment and replace it with the ratified
-rule and the reasoning above.
+**Changed:** `internal/daemon/repodb.go` `Reload` collects the colliding keys
+and logs them; the `UNRATIFIED` comment is replaced by the ratified rule and
+the reasoning above. Tests assert the collision is named and that the cap
+elides the surplus rather than merely appending a tail after it.
 
-### 4. Malformed rows are dropped with a warning
+## Ruling 4 — malformed rows are dropped with a warning
 
-Ratified. This already happens, and the owner notes it is clearly a non-issue in
-practice — none of the 38,074 real rows was dropped. But the warning is wrong in
-two ways worth correcting while the decision is being recorded.
+Ratified. This already happened, and the owner notes it is clearly a non-issue
+in practice — none of the 38,074 real rows was dropped. The rationale is
+unchanged: a malformed expected hash cannot match any bytes, so keeping the row
+would blacklist an honest peer for our own bad data, and failing to start would
+be worse.
 
-The counter is incremented by `!isHexSHA256(cksum) || pkgsize <= 0`, while the
-message reports only "malformed cksum", so a `pkgsize` problem would be
-diagnosed as a checksum problem. And the count is aggregate — no name-version of
-any dropped row is ever named.
+But the warning was wrong in two ways. The counter was incremented by
+`!isHexSHA256(cksum) || pkgsize <= 0` while the message reported only
+"malformed cksum", so a `pkgsize` problem was diagnosed as a checksum problem
+and sent the reader to the wrong column. And the count was aggregate — no
+name-version of any dropped row was ever named, leaving nothing to look up.
 
-The existing rationale comment stays: dropping is right because a malformed
-expected hash cannot match any bytes, so keeping the row would blacklist an
-honest peer for our own bad data. Failing to start would be worse.
+**Changed:** `loadRepositoryDatabase`'s single `skipped int` became a
+`skippedRows` struct with a list per cause. Rows are attributed to the **first**
+cause they fail, so the two lists partition the dropped rows rather than
+double-counting a row that is malformed twice; this is stated on the type,
+because the obvious alternative — counting a row under both causes — makes the
+two counts stop summing to the number of rows dropped, which is exactly the
+sort of thing a reader assumes without checking.
 
-**Changes:** `internal/daemon/repodb.go` — split `loadRepositoryDatabase`'s
-single `skipped` return into its two causes and report them distinctly. The
-daemon logs via package-level `log.Printf` throughout and `repodb.go` already
-imports `log`, so no logger plumbing is needed.
+## Difficulties
 
-## Also in scope
+**Observing a diagnostic that is only ever logged.** Both rulings 3 and 4 are
+about log *content*, and the reader reports collisions and dropped rows nowhere
+else — they are diagnostics, not values a caller acts on. Adding return values
+just to make them testable would have changed the API to suit the test. Instead
+`repodb_test.go` gained a `captureLog` helper that redirects the standard
+logger for one test and restores it via `t.Cleanup`. The daemon logs through
+package-level `log.Printf` throughout, so this needed no logger plumbing.
 
-- `internal/daemon/facade.go` says the facade is "Still NOT wired into
-  `Daemon.startHTTPServerLocked`". It is, and has been since §5.4. Correct it.
-- `HANDOFF.md`: mark §4.3's two riders and §5.5's three leftovers ratified,
-  carrying the reasoning above; rewrite §5.5's "one wrinkle worth a second look"
-  paragraph, since the unreachable size branch is now resolved by ruling rather
-  than left dangling.
+**Attributing a doubly-malformed row.** A row can fail both checks at once. The
+`switch` attributes each dropped row to its first failing cause; the fixture
+row `zerosize-1.0` has a well-formed `cksum` and a zero `pkgsize`, and the test
+asserts it appears on the `pkgsize` line and *not* on the `cksum` line, which
+is the case that would silently regress if the checks were ever reordered into
+an `||` again.
 
-Do **not** edit `docs/logs/elroy-uc1-config.md`. §1 says another author's work
-log is history.
+**The diagram was not in the plan.** Covered under ruling 1 above. Rendering it
+required fetching PlantUML, since neither it nor a renderer is present in this
+environment; the trap in §8 is specific enough that committing an unrendered
+diagram edit was not an option.
+
+## Areas of uncertainty
+
+Per AGENTS.md ground rule 2, and the reason this file exists at all:
+
+1. **The §4.2 per-remote-IP cap — raised, unanswered, still blocking §5.3.**
+   A *global* concurrency limit still lets one hostile IP hold every slot,
+   because nothing reclaims them, and a per-remote-IP cap is in no spec. It was
+   put to the owner during the ruling round and is the one thing that round did
+   not settle. Not invented here. It does not block anything that landed in
+   this work, but it does block §5.3, which is the next substantial item.
+
+2. **Editing files under `docs/`.** AGENTS.md's layout section says
+   "`docs/` — specs — agents do not modify these", and rulings 1 and 3 required
+   changes to `use-case-descriptions.md`, `peer-transfer-spec-v0.2.md` and
+   `uc-02.puml`. This was not an implementer's judgement call: the owner ruled
+   on the content and the ruling is only meaningful if the specs it corrects
+   are actually corrected — UC-02 asserting a rule the code does not implement
+   is the defect being fixed. Flagging it because the line in AGENTS.md is
+   unqualified and a future agent should not read these commits as licence to
+   edit a spec on its own initiative. If the owner would rather specs changed
+   only by their own hand, the four spec hunks are one revert.
+
+3. **The `logNameLimit` value of 10.** Nobody chose this number and no
+   measurement bears on it — zero collisions and zero dropped rows were
+   observed on the reference host, so the cap has never engaged in practice. It
+   is a log-formatting constant with no behavioural consequence, which is why
+   it was picked rather than escalated; §4.2's standard ("a real observed
+   problem before a control of this family") is about controls that change what
+   the daemon does, and this changes only how much of a list is printed. Say so
+   if you would rather it were configurable, but it would be a config key
+   nobody sets.
+
+## Verification
+
+The gate — `go build ./... && go vet ./... && go test ./...` plus `gofmt` —
+passes with no FreeBSD, no `pkg` and no second machine. Specifically:
+
+- `TestOpenRepositoriesSkipsMalformedRows` now asserts the two skip causes are
+  counted separately and that a well-formed-`cksum`/bad-`pkgsize` row is
+  attributed to `pkgsize` alone. Fixtures only, no real catalogue.
+- `TestCollisionResolvesToFirstPathInOrder` asserts the colliding name is
+  logged; `TestCollisionLogIsCapped` asserts the "and N more" tail elides the
+  surplus.
+- `TestFetchFirstBlacklistsCorruptPeer` and
+  `TestFetchFirstDoesNotBlacklistUnreachablePeer` already confirmed that
+  `ErrHashMismatch` blacklists and nothing else does; both still pass. No new
+  size-check test — the read cap lands with §5.3.
+- UC-02 steps 9, 9c and 11c, the UC-02 assumptions cell, `uc-02.puml` and the
+  peer spec's size-bound section were read together and state one rule, not
+  two.
+- `docs/uc-02.puml` rendered to PNG and inspected.
+
+`docs/logs/elroy-uc1-config.md` was deliberately **not** edited: §1 of the
+handoff says another author's work log is history.
+
+## Out of scope
+
+§5.3 and the cache-backed `PackageSource`; mounting the seed server; the §4.2
+per-remote-IP cap; wiring a `Reload()` trigger; and everything in §7 that needs
+the FreeBSD host.
 
 ## The seed-side gap — reported, not fixed
 
-Found while answering "what is the seed server". It is `internal/peer.Server`,
-the daemon's upload half: a TCP listener on `serving_addr` that answers another
-daemon's request for a `name-version` with the package bytes, read straight from
-the pkg cache. It is not the tracker — `cmd/trac` is a separate binary, a
-directory service that by explicit design never relays bytes.
+Found while answering "what is the seed server", and recorded here because it
+resizes the next work item. The seed server is `internal/peer.Server`, the
+daemon's upload half: a listener on `serving_addr` that answers another
+daemon's request for a `name-version` with package bytes read straight from the
+pkg cache. It is not the tracker — `cmd/trac` is a separate binary, a directory
+service that by explicit design never relays bytes.
 
 The gap: `peer.Server` is constructed in exactly one place in the tree,
 `cmd/demo/main.go`, and there is **no production `PackageSource` implementation
@@ -156,34 +246,8 @@ only for names. Meanwhile `daemon.go` announces `config.ServingPort()` to the
 tracker and the keep-alive announces the whole cache, so this daemon advertises
 packages it cannot serve and any peer acting on that entry gets
 connection-refused. A dial failure correctly does not blacklist, so the cost is
-one wasted attempt per peer.
+one wasted attempt per peer, paid by the rest of the swarm.
 
-This makes §5.3 larger than `HANDOFF.md` implies. It is not only a wire
-migration: it must **build the cache-backed seeder that has never existed**.
-Recorded in §6 as a known defect rather than fixed here — the fix belongs with
-§5.3.
-
-## Out of scope
-
-§5.3 and the cache-backed `PackageSource`; mounting the seed server; the §4.2
-per-remote-IP cap; wiring a `Reload()` trigger; and everything in §7 that needs
-the FreeBSD host.
-
-## Verification when this is executed
-
-The gate — `go build ./... && go vet ./... && go test ./...` plus `gofmt` —
-must pass with no FreeBSD, no `pkg` and no second machine. Extend the existing
-malformed-row and collision fixtures in `internal/daemon/repodb_test.go` to
-assert the two skip causes are counted separately; fixtures only, no real
-catalogue. Confirm in `internal/peer` that `ErrHashMismatch` still blacklists
-and nothing else does. No new size-check test — the read cap lands with §5.3.
-Finally, read UC-02 steps 9, 9c and 11c against the peer spec's size-bound
-section together and confirm they state one rule, not two.
-
-## Uncertainty raised, per ground rule 2
-
-Everything above was put to the owner as a question before being written down;
-none of it was an implementer's reasonable interpretation. Still unanswered and
-still blocking §5.3: the §4.2 **per-remote-IP cap**. A global concurrency limit
-lets one hostile IP hold every slot, because nothing reclaims them, and a
-per-remote-IP cap is in no spec.
+This makes §5.3 larger than a wire migration: it must **build the cache-backed
+seeder that has never existed**. It is recorded in `HANDOFF.md` §2 and §6 as a
+known defect rather than fixed here — the fix belongs with §5.3.

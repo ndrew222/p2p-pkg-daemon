@@ -28,15 +28,19 @@ commit as the work.
 - **Work log required.** `docs/logs/<author>-<feature>.md` for every feature,
   including your areas of uncertainty and whether you raised them.
 
-Current branch: `main`. The repository database reader (§5.2), the §4.3 merge
-and the mounted facade (§5.4) all landed there via PR #17 (`461e687`); the
-`worktree-repo-db-reader` branch this file used to name is merged and gone.
+Current branch: `claude/resume-from-handoff-kgvjt1`, off `main`. The repository
+database reader (§5.2), the §4.3 merge and the mounted facade (§5.4) landed on
+`main` via PR #17 (`461e687`); the `worktree-repo-db-reader` branch this file
+used to name is merged and gone.
 
-**Read `docs/logs/claude-verification-rulings.md` before starting.** The owner
-has since ruled on §4.3's two riders and §5.5's three leftovers, and on the
-unreachable size-mismatch branch. That file is a *plan*, not a work log — the
-rulings are recorded but nothing below has been edited to match them yet, so
-§4.3 and §5.5 still read as open. Executing it is the next commit.
+The owner's four verification rulings — §4.3's two riders, §5.5's three
+leftovers, and the unreachable size-mismatch branch — **have been executed** on
+this branch. `docs/logs/claude-verification-rulings.md` is now an ordinary work
+log recording what was decided and why; everything below has been edited to
+match, so §4.3 and §5.5 no longer read as open. Nothing in it is outstanding.
+
+The one thing that ruling round raised and did **not** settle is the §4.2
+per-remote-IP cap, which still blocks §5.3. See the end of §4.2.
 
 ## 1. Document map — what to trust
 
@@ -276,18 +280,32 @@ Measured 38,074 packages in **6.3 MB**. And repository identity is **hidden**:
 no consumer has a use for it, and `name-version` was measured collision-free
 across both repositories.
 
-**Two riders are UNRATIFIED and were flagged, not answered:**
+**Both riders are now RATIFIED**, each with one correction to the diagnostics:
 
 1. **Cross-repository collisions** resolve to the first in sorted path order,
-   deterministically, with the count logged. Measured zero collisions. The
-   alternatives were refuse-to-start and accept-and-log. If the wrong row ever
-   won, verification fails and the peer is blacklisted — never corrupt bytes to
-   pkg.
+   deterministically. Measured zero collisions. The alternatives were
+   refuse-to-start and accept-and-log; first-wins won because the downside is
+   bounded — UC-02 step 10 has pkg re-verify the bytes we hand over, so a wrong
+   pick degrades to a failed install, never a corrupt one — whereas refusing to
+   start lets one misconfigured third-party repository take the daemon down.
+   The choice cannot be delegated to pkg: the facade needs an expected hash
+   *before* it fetches and there is no "ask pkg" step, and the swarm has no
+   repository dimension at all (bare `name-version` at the tracker,
+   `/pkg/<name-version>` at the peer). **Correction applied:** the log now names
+   *which* name-versions collided, capped with an "and N more" tail, because the
+   one consequence pkg's re-verification does not cover is that a wrong row
+   makes us blacklist an *honest* peer for our own bad data, and the names are
+   the only thread back to that.
 2. **Malformed rows are dropped** (`cksum` not 64 lowercase hex, or `pkgsize`
    not positive). This edges toward the defensiveness §4.1 warned against, and
-   was done anyway because the failure is asymmetric: a malformed expected hash
-   cannot match any bytes, so the fetch path would blacklist an *honest* peer
-   for our own bad data. None of the 38,074 real rows was dropped.
+   is ratified anyway because the failure is asymmetric: a malformed expected
+   hash cannot match any bytes, so the fetch path would blacklist an *honest*
+   peer for our own bad data. None of the 38,074 real rows was dropped, so this
+   is a non-issue in practice. **Correction applied:** the two causes are
+   counted and reported separately and each names its rows. The counter was
+   incremented by `!isHexSHA256(cksum) || pkgsize <= 0` while the message said
+   only "malformed cksum", so a `pkgsize` problem was diagnosed as a checksum
+   problem.
 
 ## 5. Unblocked work, in order
 
@@ -377,16 +395,28 @@ work rather than rebased onto it. `internal/peer/blacklist.go` plus
 keeping two copies of the peer loop. Local only, never reported to the tracker.
 Work log: `docs/logs/claude-peer-blacklist.md`.
 
-Left deliberately undecided, and still open if the owner wants them: entries
-have **no expiry** and are **not persisted** across restarts, and a peer is
-blacklisted **for everything**, not per package. Each was unasked, so the
-literal reading won.
+The three positions left deliberately undecided are **now ratified as the code
+already had them**: entries have **no expiry**, are **not persisted** across
+restarts, and a peer is blacklisted **for everything**, not per package —
+corrupt bytes are evidence about the peer, not about one file.
 
-One wrinkle worth a second look: UC-02's refinement says **a size or hash
-mismatch blacklists**, but the fetch path only ever raises `ErrHashMismatch` —
-there is no separate size check to trip, so "size" is currently unreachable
-rather than implemented. A `404` correctly does not blacklist: it means the peer
-no longer holds the file, not that it lied.
+**Culling is by restart, and that is the whole mechanism.** The list is
+in-memory and unpersisted, so a restart clears it completely. There is no
+`Unblock` and none is planned: something would have to call it, and an admin
+surface is in no spec. What the ruling did require is that the log show what a
+restart would clear, so `download.go` now reports the resulting list on every
+block — which finally gives `Blacklist.Addrs()` the caller it was written for.
+
+The wrinkle about the unreachable size branch is **resolved by ruling, not left
+dangling**. UC-02 used to say "a size or hash mismatch blacklists" while the
+fetch path only ever raised `ErrHashMismatch`. The owner's ruling keeps it that
+way: `pkgsize` is a **transfer bound, not a verdict**. A `Content-Length` that
+disagrees, or a body that overruns, abandons the peer and moves to the next
+holder *without* blacklisting — wrong-length bytes fail the hash anyway if read
+to completion, so a size verdict is a second route to the same conclusion. Only
+`ErrHashMismatch` blacklists. A `404` still does not: it means the peer no
+longer holds the file, not that it lied. UC-02 steps 9/9c/11c, its assumptions
+cell, `uc-02.puml` and the peer spec's size-bound section now state one rule.
 
 ### 5.6 The other §4.1 half nobody has checked
 The facade and the watcher now agree on `~hash10`, but §7.5 below — whether the
