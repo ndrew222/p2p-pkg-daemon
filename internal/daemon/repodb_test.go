@@ -164,6 +164,7 @@ func TestOpenRepositoriesSkipsMalformedRows(t *testing.T) {
 		{"zerosize", "1.0", 0, hash64('c')},
 	})
 
+	logged := captureLog(t)
 	repo, err := OpenRepositories(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +177,35 @@ func TestOpenRepositoriesSkipsMalformedRows(t *testing.T) {
 			t.Errorf("ExpectedHash(%q) found a malformed row", nv)
 		}
 	}
+
+	// The two causes are counted and reported separately: a pkgsize problem
+	// diagnosed as a checksum problem sends the reader to the wrong column.
+	out := logged()
+	if !strings.Contains(out, "skipped 3 row(s) whose cksum") {
+		t.Errorf("want 3 rows dropped for a bad cksum; got:\n%s", out)
+	}
+	if !strings.Contains(out, "skipped 1 row(s) whose pkgsize") {
+		t.Errorf("want 1 row dropped for a bad pkgsize; got:\n%s", out)
+	}
+	// zerosize-1.0 has a well-formed cksum, so it must be attributed to
+	// pkgsize alone rather than swept into the checksum count.
+	cksumLine, sizeLine := logLineContaining(out, "cksum"), logLineContaining(out, "pkgsize")
+	if strings.Contains(cksumLine, "zerosize-1.0") {
+		t.Errorf("zerosize-1.0 attributed to the cksum cause: %s", cksumLine)
+	}
+	if !strings.Contains(sizeLine, "zerosize-1.0") {
+		t.Errorf("zerosize-1.0 not named on the pkgsize line: %s", sizeLine)
+	}
+}
+
+// logLineContaining returns the first line of out holding want, or "".
+func logLineContaining(out, want string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	return ""
 }
 
 // Ratified: first repository in sorted path order wins, deterministically, and

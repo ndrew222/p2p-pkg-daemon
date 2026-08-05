@@ -89,13 +89,23 @@ func (r *Repositories) Reload() error {
 		if err != nil {
 			return fmt.Errorf("daemon: %s: %w", path, err)
 		}
-		if skipped > 0 {
-			// A row whose cksum is not a hex SHA-256 is worse than
-			// useless: the fetch path would compare peer bytes against
-			// it, never match, and blacklist an honest peer for our own
-			// bad data. Dropping the row means the package is simply not
-			// served, which is the correct failure.
-			log.Printf("daemon: %s: skipped %d row(s) with a malformed cksum", path, skipped)
+		// A row the daemon cannot trust is worse than useless: the fetch
+		// path would compare peer bytes against it, never match, and
+		// blacklist an honest peer for our own bad data. Dropping the row
+		// means the package is simply not served, which is the correct
+		// failure. Failing to start over it would be worse.
+		//
+		// The two causes are reported separately because they are
+		// different faults with different diagnoses, and a single
+		// "malformed cksum" message for a pkgsize problem sends the
+		// reader looking in the wrong column.
+		if n := len(skipped.badCksum); n > 0 {
+			log.Printf("daemon: %s: skipped %d row(s) whose cksum is not a lowercase hex SHA-256: %s",
+				path, n, namesForLog(skipped.badCksum))
+		}
+		if n := len(skipped.badPkgSize); n > 0 {
+			log.Printf("daemon: %s: skipped %d row(s) whose pkgsize is not positive: %s",
+				path, n, namesForLog(skipped.badPkgSize))
 		}
 		for nameVersion, row := range loaded {
 			if _, dup := rows[nameVersion]; dup {
@@ -190,12 +200,22 @@ func repositoryDatabases(dir string) ([]string, error) {
 	return paths, nil
 }
 
+// skippedRows names the rows loadRepositoryDatabase dropped, split by cause.
+// A row is attributed to the first cause it fails, so the two lists partition
+// the dropped rows rather than double-counting one that is malformed twice.
+type skippedRows struct {
+	badCksum   []string
+	badPkgSize []string
+}
+
 // loadRepositoryDatabase reads one catalogue into memory, returning the rows
-// and the number dropped for a malformed cksum.
-func loadRepositoryDatabase(path string) (map[string]repoRow, int, error) {
+// and the name-versions dropped, by cause.
+func loadRepositoryDatabase(path string) (map[string]repoRow, skippedRows, error) {
+	var skipped skippedRows
+
 	db, err := sql.Open("sqlite", readOnlyDSN(path))
 	if err != nil {
-		return nil, 0, fmt.Errorf("opening: %w", err)
+		return nil, skipped, fmt.Errorf("opening: %w", err)
 	}
 	defer db.Close()
 
@@ -204,26 +224,29 @@ func loadRepositoryDatabase(path string) (map[string]repoRow, int, error) {
 	// the watcher produce via parsePackageName.
 	rows, err := db.Query(`SELECT name, version, pkgsize, cksum FROM packages`)
 	if err != nil {
-		return nil, 0, fmt.Errorf("querying packages: %w", err)
+		return nil, skipped, fmt.Errorf("querying packages: %w", err)
 	}
 	defer rows.Close()
 
 	out := make(map[string]repoRow)
-	var skipped int
 	for rows.Next() {
 		var name, version, cksum string
 		var pkgsize int64
 		if err := rows.Scan(&name, &version, &pkgsize, &cksum); err != nil {
-			return nil, 0, fmt.Errorf("scanning packages: %w", err)
+			return nil, skipped, fmt.Errorf("scanning packages: %w", err)
 		}
-		if !isHexSHA256(cksum) || pkgsize <= 0 {
-			skipped++
-			continue
+		nameVersion := name + "-" + version
+		switch {
+		case !isHexSHA256(cksum):
+			skipped.badCksum = append(skipped.badCksum, nameVersion)
+		case pkgsize <= 0:
+			skipped.badPkgSize = append(skipped.badPkgSize, nameVersion)
+		default:
+			out[nameVersion] = repoRow{hash: cksum, size: pkgsize}
 		}
-		out[name+"-"+version] = repoRow{hash: cksum, size: pkgsize}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("reading packages: %w", err)
+		return nil, skipped, fmt.Errorf("reading packages: %w", err)
 	}
 	return out, skipped, nil
 }
