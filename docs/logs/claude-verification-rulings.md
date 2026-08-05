@@ -163,6 +163,32 @@ asserts it appears on the `pkgsize` line and *not* on the `cksum` line, which
 is the case that would silently regress if the checks were ever reordered into
 an `||` again.
 
+**Naming the rows costs memory, and the obvious saving is a trap.** Rulings 3
+and 4 both turned an `int` counter into a `[]string`: `collisions`, and
+`skipped.badCksum` / `badPkgSize`. That is `O(1)` → `O(n)` in the number of bad
+rows, and the bad case is not small — a third-party repository that shadows
+ports wholesale, or a corrupt catalogue whose every row drops. At the reference
+host's scale (37,835 rows in the larger repository) the worst case is roughly
+**1.4 MB**, held transiently and freed once the log line is formatted: for
+`collisions` the entries are map keys from `loaded`, so `append` copies only the
+16-byte string header but keeps the backing bytes alive past the point `loaded`
+would otherwise be released; for the skip lists each entry is a fresh
+`name + "-" + version`. Against a 6.3 MB snapshot that is about +22% at peak,
+and nothing against the 1 GiB host UC-02 budgets for. Neither case has been
+observed: zero collisions and zero dropped rows on the reference host.
+
+The saving that suggests itself does not work. Since `namesForLog` prints at
+most `logNameLimit` names plus a count, it looks like only ten need to be kept.
+For the skip lists that would be sound — they are built while ranging
+`sql.Rows`, in deterministic order. For `collisions` it is not: that list is
+built by ranging `loaded`, a Go map, so iteration order is randomised and
+truncating before the sort would print a different ten every run, losing the
+determinism the code claims two lines above. Preserving both would need a
+bounded min-heap, which is a great deal of machinery for a log line, and
+treating the two lists differently is worse than the megabyte. Kept as it is,
+deliberately: naming the rows was the ruling, and you cannot name what you did
+not keep.
+
 **The diagram was not in the plan.** Covered under ruling 1 above. Rendering it
 required fetching PlantUML, since neither it nor a renderer is present in this
 environment; the trap in §8 is specific enough that committing an unrendered
