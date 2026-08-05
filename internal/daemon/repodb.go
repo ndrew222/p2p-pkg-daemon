@@ -273,14 +273,16 @@ func readOnlyDSN(path string) string {
 const logNameLimit = 10
 
 // namesForLog renders keys as a sorted, comma-separated list of at most
-// logNameLimit entries with an "and N more" tail. It sorts keys in place;
-// every caller passes a slice it owns.
+// logNameLimit entries with an "and N more" tail. It sorts a copy: rendering a
+// diagnostic is not a reason to reorder the caller's slice, and a caller that
+// later reported a count from the same slice would be reading a reordered one.
 func namesForLog(keys []string) string {
-	sort.Strings(keys)
-	if len(keys) <= logNameLimit {
-		return strings.Join(keys, ", ")
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	if len(sorted) <= logNameLimit {
+		return strings.Join(sorted, ", ")
 	}
-	return fmt.Sprintf("%s and %d more", strings.Join(keys[:logNameLimit], ", "), len(keys)-logNameLimit)
+	return fmt.Sprintf("%s and %d more", strings.Join(sorted[:logNameLimit], ", "), len(sorted)-logNameLimit)
 }
 
 // isHexSHA256 reports whether s is exactly 64 lowercase hex digits.
