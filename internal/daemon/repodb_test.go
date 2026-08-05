@@ -198,6 +198,38 @@ func TestOpenRepositoriesSkipsMalformedRows(t *testing.T) {
 	}
 }
 
+// A row can fail both checks at once. It is attributed to the cksum -- the
+// first cause it fails, and the one to act on, since no hash means no
+// verification at all -- and must not also appear under pkgsize, or the two
+// lists stop partitioning the dropped rows and one bad row is reported twice.
+// This is the case that regresses silently if the switch is ever folded back
+// into a single `||`.
+func TestSkipCausesDoNotDoubleCount(t *testing.T) {
+	dir := t.TempDir()
+	// The well-formed row is load-bearing: Reload rejects an empty snapshot,
+	// so a catalogue of nothing but the malformed row fails before the
+	// diagnostic under test is reached.
+	writeRepoDB(t, dir, "FreeBSD-ports", []fixtureRow{
+		{"good", "1.0", 10, hash64('a')},
+		{"both", "1.0", 0, "nope"},
+	})
+
+	logged := captureLog(t)
+	if _, err := OpenRepositories(dir); err != nil {
+		t.Fatal(err)
+	}
+	out := logged()
+	if !strings.Contains(out, "skipped 1 row(s) whose cksum") {
+		t.Errorf("want the doubly-malformed row counted once, under cksum; got:\n%s", out)
+	}
+	if strings.Contains(out, "whose pkgsize") {
+		t.Errorf("doubly-malformed row also reported under pkgsize; got:\n%s", out)
+	}
+	if line := logLineContaining(out, "cksum"); !strings.Contains(line, "both-1.0") {
+		t.Errorf("cksum line does not name both-1.0: %s", line)
+	}
+}
+
 // logLineContaining returns the first line of out holding want, or "".
 func logLineContaining(out, want string) string {
 	for _, line := range strings.Split(out, "\n") {
