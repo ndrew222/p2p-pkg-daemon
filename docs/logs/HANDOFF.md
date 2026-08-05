@@ -368,7 +368,24 @@ bashisms, no GNU extensions.**
 ### 5.3 Peer wire migration (§3.2)
 Work to the peer spec's migration table and definition of done. This deletes
 `internal/peerwire` and rewrites `peer.Server`, `FetchFromPeer`, `PackageSource`,
-`cmd/demo` and both peer test files.
+`cmd/demo` and both peer test files. It also has to build the cache-backed
+seeder that has never existed — see §2, which is the reason this is a build and
+not just a migration.
+
+Two things it must carry that are easy to lose:
+
+- The §4.2 `503` semaphore.
+- The size bound from §5.5, as real code: `io.LimitReader(body,
+  expectedSize+1)` plus the `Content-Length` check. Neither can exist while the
+  fetch path returns a `[]byte`.
+
+**Do not delete `internal/peerwire` before that bound is in place.**
+`MaxPayload` (`wire.go:24`, enforced at `:53`) is today the *only* length check
+on the fetch path — `FetchFromPeer` reads through `peerwire.ReadMessage` — so
+removing the package first leaves the fetch loop with nothing between it and a
+hostile peer streaming unbounded bytes. This is about ordering within §5.3, not
+a reprieve: `MaxPayload` is a 64 MiB global cap of exactly the kind §8 forbids,
+and it goes when its replacement lands, in the same change.
 
 ### 5.4 Mount the facade and the seed server — **facade half DONE**
 
