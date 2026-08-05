@@ -157,11 +157,16 @@ logger for one test and restores it via `t.Cleanup`. The daemon logs through
 package-level `log.Printf` throughout, so this needed no logger plumbing.
 
 **Attributing a doubly-malformed row.** A row can fail both checks at once. The
-`switch` attributes each dropped row to its first failing cause; the fixture
-row `zerosize-1.0` has a well-formed `cksum` and a zero `pkgsize`, and the test
-asserts it appears on the `pkgsize` line and *not* on the `cksum` line, which
-is the case that would silently regress if the checks were ever reordered into
-an `||` again.
+`switch` attributes each dropped row to its first failing cause, and two
+fixtures pin the two halves of that. `zerosize-1.0`, in
+`TestOpenRepositoriesSkipsMalformedRows`, has a well-formed `cksum` and a zero
+`pkgsize`, and is asserted onto the `pkgsize` line and *not* the `cksum` line —
+it catches a fold back into a single `||` reported as one "malformed cksum"
+message. It does not catch double-counting, because it only ever fails one
+check. That case needs a row failing *both*, and `TestSkipCausesDoNotDoubleCount`
+supplies it: `both-1.0`, with a malformed `cksum` and a zero `pkgsize`, asserted
+onto the `cksum` line and absent from the `pkgsize` line entirely. Confirmed to
+bite by splitting the `switch` into two independent `if`s and watching it fail.
 
 **Naming the rows costs memory, and the obvious saving is a trap.** Rulings 3
 and 4 both turned an `int` counter into a `[]string`: `collisions`, and
