@@ -8,8 +8,26 @@ Most of what used to live here has moved into ADRs and work logs; this file now
 points at them rather than restating them. Where it disagrees with a document
 in `docs/`, that document wins.
 
-Section numbers (`§4.1`, `§5.3`, `§7.1`, …) are cited from ADRs, work logs and
-commit messages. **Do not renumber them.**
+Section numbers (`§4.1`, `§5.3`, `§7.1`, …) are cited from ADRs, work logs,
+commit messages and **Go source comments**. **Do not renumber them, and do not
+recycle a retired number for a new item.**
+
+### Where the cited-but-retired numbers went
+
+The rewrite at `234a75b` folded several subsections into tables and topic
+pointers, so some numbers other documents cite no longer have a heading here.
+They are not dead — this is where each resolves.
+
+| Cited as | Cited by | Where it lives now |
+|---|---|---|
+| §3.1 | **ADR-003** (twice: the `temp_dir` consumer, and the `FetchFromPeer` `[]byte` blocker) | Config schema, done — §5.1. The `[]byte` blocker is §5.3; the `temp_dir` concern is resolved by ADR-003 itself, which narrows the justification to "retry needs the whole file". |
+| §4.1 | `claude-config-schema.md`, `claude-verification-rulings.md` | Cache/path layout ruling — §3's topic table → `claude-verification-rulings.md`. Cross-check closed by §7.5, recorded at §5.6. |
+| §4.2 | **ADR-002** (twice) | Serving-side concurrency. Superseded outright by ADR-002; §5.3 implements it. |
+| §4.3 | `internal/daemon/facade.go:59`, `internal/daemon/repository.go:19` | Repository-database rulings — §3's topic table → `claude-verification-rulings.md`. |
+| §7.1–§7.5 | ADR-003, `claude-pkg-mirror-verification.md` | All answered — §7, full detail in `claude-pkg-mirror-verification.md`. |
+| §7.6 | `claude-config-schema.md`, `claude-repo-db-reader.md` | **Never had a definition anywhere**, including before the rewrite. From its two citations it was the residual risk that `cksum` format was measured on one repository and one ABI. `claude-repo-db-reader.md` reports 0 of 38,074 rows non-conforming across *both* repositories, which substantially retires it. Treat the number as historical; do not reuse it. |
+
+New blockers take fresh numbers from **§4.4** onward.
 
 Keep this file current. If you resolve something here, edit it in the same
 commit as the work.
