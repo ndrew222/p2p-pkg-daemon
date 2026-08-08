@@ -74,6 +74,7 @@ exist, so as written it cannot be implemented at all. See §4.4.
 | `docs/adr/adr-001-transport-nat.md` | **Approved.** No NAT traversal; plain HTTP over TCP to the advertised IP:port. |
 | `docs/adr/adr-002-serving-side-concurrency.md` | **Approved.** Global *and* per-remote-IP semaphores, `503` when either is full, default `0` = unlimited. Implement with §5.3. |
 | `docs/adr/adr-003-facade-fetch-semantics.md` | **Approved.** Facade proxies to upstream on a peer miss; peer path spools, upstream path streams; no facade cache. |
+| `docs/adr/adr-004-facade-path-rule.md` | **Proposed — needs vetting.** Carries the `All/` + `Hashed/` + `~hash10` path rule out of the deprecated facade spec. Introduces no new decision; if it differs from that spec's text, the spec wins. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
@@ -89,9 +90,24 @@ deleted, so the reasoning that changed stays visible.
 | Document | What changed |
 |---|---|
 | `docs/use-case-descriptions.md` UC-02 | Description, precondition, error-state list and the assumptions paragraph now carry the ADR-003 model. New alternative flow **8f–10f (upstream fallback)** and error state **9g–11g (upstream also failed → terminal `502`)**. Flows 6a/7a, 7b/8b and 9d/10d no longer end in "pkg tries its next mirror" — they route to 8f. |
-| `docs/mirror-facade-spec-v0.1.md` | Supersession banner at the top; *What the facade is* rewritten around proxy-with-fallback and the asymmetric verification placement; status-code table rebuilt (see below); *What the facade does not do* now covers the no-facade-cache ruling. |
+| `docs/mirror-facade-spec-v0.1.md` | **Now DEPRECATED outright** — see below. It was first corrected in place (proxy-with-fallback, asymmetric verification, rebuilt status table), then deprecated by the owner once ADR-003 was confirmed as its successor. Read it as history only. |
 | `docs/uc-02.puml` | New `Upstream Mirror` participant and an `opt no verified bytes from any peer` block carrying both outcomes. Renders clean (`plantuml -checkonly`). |
 | `docs/peer-transfer-spec-v0.2.md` | ADR-002's `503`: response-table row, a *Serving side obligations* bullet, the "`503` must not re-announce" rule next to the `404` obligation, and the concurrency row in *Deliberately unspecified* closed. |
+
+### The pkg↔daemon wire has no spec file
+
+`mirror-facade-spec-v0.1.md` is **deprecated** (owner ruling, 2026-08-08). It was
+never binding — its own status block says it was drafted by an implementing
+agent, not the spec owner — and ADR-003 overruled the model it was built on.
+There is no v0.2 and none is planned. The facade is governed by **ADR-003**
+(fetch semantics, status codes, verification placement, no cache) and
+**ADR-004** (path rule, `GET`-only).
+
+The file is retained, banner-first, mapping each section to its successor. One
+caveat is live: **until ADR-004 is approved, the deprecated spec's *Request
+surface* section is still the only specification of a path rule that shipped
+code depends on** — `internal/daemon/facade.go`, `watcher.go`, `repodb.go` and
+three test files. Vetting ADR-004 closes that gap.
 
 **The facade status table is the change most worth reading before touching the
 facade.** Four separate conditions the old table answered — tracker unreachable,
