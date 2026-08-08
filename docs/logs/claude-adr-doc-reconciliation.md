@@ -78,8 +78,13 @@ paragraph is precisely the "reasonable interpretation" ground rule 2 exists to
 stop. It also decides whether UC-07 survives at all.
 
 **Raised with:** the owner, in this session, and recorded in three places so it
-cannot be missed — `HANDOFF.md` §4.1, `mirror-facade-spec-v0.1.md` (open
+cannot be missed — `HANDOFF.md` §4.4, `mirror-facade-spec-v0.1.md` (open
 question 7 plus an inline warning), and UC-07's description.
+
+"Metadata" means the catalogue files — `meta.conf`, `packagesite.pkg`,
+`data.pkg`, listings, `/` — not the `~hash10` path suffix or `packages.cksum`.
+The owner asked, which means the word was doing too much work unqualified, so
+§4.4 now states the distinction before posing the question.
 **Outcome:** open. Needs its own ADR.
 
 One observation offered rather than a decision: relaying is not vouching. pkg
@@ -88,8 +93,19 @@ mirror" survives a pass-through. Only "never proxies metadata" cannot.
 
 ### 2. Which upstream mirror, and the config key name — NOT ATTEMPTED
 
-ADR-003 explicitly leaves this open. Recorded at `HANDOFF.md` §4.2 and facade
+ADR-003 explicitly leaves this open. Recorded at `HANDOFF.md` §4.5 and facade
 open question 6. Not invented, per ground rule 3.
+
+### 5. I reused §4.1 and §4.2 for the new blockers — CAUGHT BY THE OWNER
+
+Numbering mistake, corrected to §4.4 and §4.5. §4.1–§4.3 are historical items
+that are cited widely and must not be recycled: §4.2 is cited by **ADR-002**
+(a rank-1 document) twice, §4.3 by `internal/daemon/facade.go:59` and
+`internal/daemon/repository.go:19`, and §4.1 by two other work logs. The
+`HANDOFF.md` preamble already warned that section numbers are cited externally
+and renumbering orphans them; I renumbered anyway, in the same pass whose whole
+purpose was fixing stale cross-references. §4's header now says explicitly that
+new blockers start at §4.4.
 
 ### 3. A serving-side test for the ADR-002 caps — DELIBERATELY NOT ADDED
 
