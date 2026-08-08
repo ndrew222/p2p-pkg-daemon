@@ -479,15 +479,65 @@ observations; nothing proves the observations are consistent with each other.
 Everything here needs the FreeBSD host. The owner has granted SSH access
 (`root@45.76.163.52`).
 
+**Recon is done; the experiment is not.** Read-only commands only — nothing was
+written to the host. Work log: `docs/logs/claude-pkg-mirror-verification.md`,
+which carries the probe-server script and the repo configs ready to run. **One
+run of that harness answers items 1–5**: it proxies signed metadata from a real
+mirror so pkg treats it as a genuine repository, intercepts only `All/*.pkg`,
+and logs every request with headers — so items 3 (`HEAD`/`Range`) and 5 (cache
+layout) fall out of the log and the post-install cache at no extra cost. What
+is now measured:
+
+| Fact | Value |
+|---|---|
+| OS / pkg | `FreeBSD 15.1-RELEASE-p1 amd64`, pkg **2.7.5** — the same pkg behind every §4.1 measurement |
+| ABI | `FreeBSD:15:amd64`, osversion `1501000` |
+| `/usr/local/etc/pkg/repos/` | **does not exist** |
+| Tools | `python3` 3.12.13, `sqlite3`, `fetch`, `nc`. **No `curl`** — write recipes with `fetch -qo -`. |
+| `/var/cache/pkg` | 32 entries, 20G free |
+
+**The experiment is blocked on permission, not on knowledge.** It needs a
+listener started on the host, a repo config written there, and one real
+`pkg install`. SSH access is not the same as authorisation to reconfigure the
+package manager, so it was raised rather than assumed.
+
 1. **Does pkg actually fall through to the next mirror on a non-200?** This is
    *the* load-bearing assumption of the entire design — every failure path in
    UC-02 and all of UC-07 depend on it — and it has **never been verified**.
    UC-07's assumptions say the integration smoke test must confirm it. If it is
    false, the architecture changes. Do this before building more on top of it.
+
+   **Sharpened by recon:** the question is ambiguous as written, and the
+   ambiguity is load-bearing. pkg has *two* different fallback mechanisms —
+   next **mirror** within a repository (fetch time) and next **repository**
+   (solve time) — and this item does not say which one it means. If only the
+   repository mechanism is available and pkg does not re-solve after a fetch
+   failure, a facade `404` is fatal to the install rather than a fall-through.
+   Do not assume; the harness tests both.
 2. **How is mirror ordering configured?** Getting the daemon *first* and a real
    mirror second. UC-07 says the same smoke test settles it. We have no
    confirmed `pkg.conf` / `repos/*.conf` recipe, and without one the daemon
    cannot be exercised in situ at all.
+
+   **Sharpened by recon.** There is no recipe to discover — `/usr/local/etc/pkg/repos/`
+   does not exist on the host, so this has to be *derived*, and whatever is
+   derived is the first such config the project has ever had. The stock repo is
+   `mirror_type: "srv"` over `pkg+https://`, with `_https._tcp.pkg.freebsd.org`
+   resolving to a single SRV record. Three candidate mechanisms, with very
+   different consequences for jmj:
+
+   1. **`mirror_type: "srv"`** — ordering from DNS SRV priority. Requires the
+      daemon in DNS; not plausible for a loopback daemon.
+   2. **`mirror_type: "http"`** — pkg fetches the URL and expects `URL: <base>`
+      lines, tried in order. This *would* let the daemon hand pkg a list naming
+      itself first and a real mirror second. **It is in no jmj spec**, so if this
+      is the answer, the facade grows a mirror-list endpoint and the facade spec
+      needs a ruling.
+   3. **Two repositories with `priority`.** Repository fallback, not mirror
+      fallback — i.e. mechanism-2-vs-3 is the same distinction item 1 turns on.
+
+   This is the most useful thing recon produced and it is recorded nowhere in
+   `docs/`.
 3. **Does pkg issue `HEAD` or `Range` against mirrors?** Facade open questions 1
    and 5. The size objection to answering `HEAD` is gone (§5.2 gives an exact
    size without fetching), so this is now purely a question about pkg's
