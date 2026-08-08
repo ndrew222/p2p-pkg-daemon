@@ -8,8 +8,26 @@ Most of what used to live here has moved into ADRs and work logs; this file now
 points at them rather than restating them. Where it disagrees with a document
 in `docs/`, that document wins.
 
-Section numbers (`§4.1`, `§5.3`, `§7.1`, …) are cited from ADRs, work logs and
-commit messages. **Do not renumber them.**
+Section numbers (`§4.1`, `§5.3`, `§7.1`, …) are cited from ADRs, work logs,
+commit messages and **Go source comments**. **Do not renumber them, and do not
+recycle a retired number for a new item.**
+
+### Where the cited-but-retired numbers went
+
+The rewrite at `234a75b` folded several subsections into tables and topic
+pointers, so some numbers other documents cite no longer have a heading here.
+They are not dead — this is where each resolves.
+
+| Cited as | Cited by | Where it lives now |
+|---|---|---|
+| §3.1 | **ADR-003** (twice: the `temp_dir` consumer, and the `FetchFromPeer` `[]byte` blocker) | Config schema, done — §5.1. The `[]byte` blocker is §5.3; the `temp_dir` concern is resolved by ADR-003 itself, which narrows the justification to "retry needs the whole file". |
+| §4.1 | `claude-config-schema.md`, `claude-verification-rulings.md` | Cache/path layout ruling — §3's topic table → `claude-verification-rulings.md`. Cross-check closed by §7.5, recorded at §5.6. |
+| §4.2 | **ADR-002** (twice) | Serving-side concurrency. Superseded outright by ADR-002; §5.3 implements it. |
+| §4.3 | `internal/daemon/facade.go:59`, `internal/daemon/repository.go:19` | Repository-database rulings — §3's topic table → `claude-verification-rulings.md`. |
+| §7.1–§7.5 | ADR-003, `claude-pkg-mirror-verification.md` | All answered — §7, full detail in `claude-pkg-mirror-verification.md`. |
+| §7.6 | `claude-config-schema.md`, `claude-repo-db-reader.md` | **Never had a definition anywhere**, including before the rewrite. From its two citations it was the residual risk that `cksum` format was measured on one repository and one ABI. `claude-repo-db-reader.md` reports 0 of 38,074 rows non-conforming across *both* repositories, which substantially retires it. Treat the number as historical; do not reuse it. |
+
+New blockers take fresh numbers from **§4.4** onward.
 
 Keep this file current. If you resolve something here, edit it in the same
 commit as the work.
@@ -56,6 +74,7 @@ exist, so as written it cannot be implemented at all. See §4.4.
 | `docs/adr/adr-001-transport-nat.md` | **Approved.** No NAT traversal; plain HTTP over TCP to the advertised IP:port. |
 | `docs/adr/adr-002-serving-side-concurrency.md` | **Approved.** Global *and* per-remote-IP semaphores, `503` when either is full, default `0` = unlimited. Implement with §5.3. |
 | `docs/adr/adr-003-facade-fetch-semantics.md` | **Approved.** Facade proxies to upstream on a peer miss; peer path spools, upstream path streams; no facade cache. |
+| `docs/adr/adr-004-facade-path-rule.md` | **Approved.** Carries the `All/` + `Hashed/` + `~hash10` path rule out of the deprecated facade spec. Introduces no new decision; if it differs from that spec's text, the spec wins. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
@@ -71,9 +90,24 @@ deleted, so the reasoning that changed stays visible.
 | Document | What changed |
 |---|---|
 | `docs/use-case-descriptions.md` UC-02 | Description, precondition, error-state list and the assumptions paragraph now carry the ADR-003 model. New alternative flow **8f–10f (upstream fallback)** and error state **9g–11g (upstream also failed → terminal `502`)**. Flows 6a/7a, 7b/8b and 9d/10d no longer end in "pkg tries its next mirror" — they route to 8f. |
-| `docs/mirror-facade-spec-v0.1.md` | Supersession banner at the top; *What the facade is* rewritten around proxy-with-fallback and the asymmetric verification placement; status-code table rebuilt (see below); *What the facade does not do* now covers the no-facade-cache ruling. |
+| `docs/mirror-facade-spec-v0.1.md` | **Now DEPRECATED outright** — see below. It was first corrected in place (proxy-with-fallback, asymmetric verification, rebuilt status table), then deprecated by the owner once ADR-003 was confirmed as its successor. Read it as history only. |
 | `docs/uc-02.puml` | New `Upstream Mirror` participant and an `opt no verified bytes from any peer` block carrying both outcomes. Renders clean (`plantuml -checkonly`). |
 | `docs/peer-transfer-spec-v0.2.md` | ADR-002's `503`: response-table row, a *Serving side obligations* bullet, the "`503` must not re-announce" rule next to the `404` obligation, and the concurrency row in *Deliberately unspecified* closed. |
+
+### The pkg↔daemon wire has no spec file
+
+`mirror-facade-spec-v0.1.md` is **deprecated** (owner ruling, 2026-08-08). It was
+never binding — its own status block says it was drafted by an implementing
+agent, not the spec owner — and ADR-003 overruled the model it was built on.
+There is no v0.2 and none is planned. The facade is governed by **ADR-003**
+(fetch semantics, status codes, verification placement, no cache) and
+**ADR-004** (path rule, `GET`-only).
+
+The file is retained, banner-first, mapping each section to its successor. The
+path rule that shipped code depends on — `internal/daemon/facade.go`,
+`watcher.go`, `repodb.go` and three test files — now lives in **ADR-004
+(Approved)**; the deprecated spec's *Request surface* section is history, not the
+governing text.
 
 **The facade status table is the change most worth reading before touching the
 facade.** Four separate conditions the old table answered — tracker unreachable,
@@ -208,11 +242,56 @@ implements either reading by accident.
 ### 4.5 Which upstream mirror, and what the config key is called
 
 ADR-003 requires a configured upstream and deliberately leaves the key name, the
-TLS decision and the choice of mirror open. Note that
-`pkg+https://pkg.FreeBSD.org/${ABI}/quarterly` resolves via DNS SRV, so the
-daemon must either resolve SRV itself or be pointed at a concrete host such as
-`pkgmir.geo.freebsd.org`. **Blocks §5.7.** Do not invent a key name — `AGENTS.md`
-ground rule 3.
+TLS decision and the choice of mirror open. **Blocks §5.7.** Do not invent a key
+name — `AGENTS.md` ground rule 3.
+
+**Correction: SRV is not a problem, and an earlier draft of this section said it
+was.** The claim was that the daemon must resolve SRV itself or be pointed at a
+concrete host. Measured, 2026-08-08:
+
+```
+pkg.FreeBSD.org.            CNAME  pkgmir.geo.FreeBSD.org.
+                            A      151.101.{1,65,129,193}.241     (Fastly)
+                            AAAA   2a04:4e42:{::,200::,400::,600::}497
+_https._tcp.pkg.FreeBSD.org SRV    10 10 443 pkgmir.geo.freebsd.org.
+```
+
+`pkg.FreeBSD.org` resolves through ordinary A/AAAA records, so Go's stdlib HTTP
+client reaches it with no special handling. And the SRV record holds **one
+target, on port 443, naming the host the CNAME already resolves to** — so SRV
+buys nothing today that plain DNS does not. Let DNS handle it.
+
+The honest residual: FreeBSD *could* later publish several prioritised SRV
+targets, and pkg would honour them while jmj would not. That is a divergence in
+mirror selection, not a failure — plain DNS still yields a working host — and it
+is not a reason to hand-roll a resolver now.
+
+### Candidate: discover the upstream from pkg's own config instead of a new key
+
+Worth considering before adding a config key, because it gives a zero-config
+happy path. The URL already exists on the machine, in `/etc/pkg/FreeBSD.conf`:
+
+```
+FreeBSD: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/quarterly", ... }
+```
+
+Reading it is consistent with the constraints — it is read-only, and the daemon
+already reads pkg's repository database. Three wrinkles the ruling should
+address:
+
+1. **`${ABI}` is unexpanded in the file.** The daemon must substitute it
+   (`pkg config abi` reports it, e.g. `FreeBSD:15:amd64`).
+2. **The `pkg+` prefix must be stripped** to get a URL an ordinary HTTP client
+   accepts.
+3. **Discovery can come up empty.** Under ADR-003 jmj must be the only
+   *enabled* repository, so the stock block has to be disabled — `enabled: no`
+   leaves it readable and discovery still works, but an operator who deletes the
+   block or renames the repo leaves nothing to find. Whatever is decided needs a
+   defined behaviour there; silently proxying from nowhere is the bad outcome.
+
+A reasonable shape, if the owner wants one: an optional explicit key that
+overrides, defaulting to discovery, and a hard startup failure when neither
+yields a URL. **Not decided — recorded as a candidate, not a design.**
 
 ## 5. Work, in order
 
@@ -263,12 +342,36 @@ call panics. Both wiring sites go through `Daemon.repository()` for this reason;
 
 ### 5.6 §4.1 cache-layout cross-check — **CLOSED** by §7.5.
 
-### 5.7 Facade rework under ADR-003 — **unclaimed, needs scoping**
+### 5.7 Facade rework under ADR-003 — **BLOCKED. Do not start.**
 
-ADR-003 is approved and nothing is implemented. This is the second-largest piece
-of work in the tree after §5.3 and is largely independent of it: the new
-upstream-mirror config key, streaming the upstream path, and the three document
-corrections listed in §1.
+**`internal/daemon/facade.go` implements a model that has been measured false
+and is not to be extended, tuned or partially migrated until the two rulings
+below land.** The file is not broken in the sense of failing its tests — it
+does exactly what the old spec said — but what the old spec said does not work
+against real pkg. Treat it as frozen, not as a starting point.
+
+The specific mismatch: on a peer miss it returns an HTTP error, on the
+assumption that pkg falls through to another mirror. §7.1 measured that it does
+not — a facade error ends the install. Under ADR-003 that path must instead
+fetch from a configured upstream mirror and stream the bytes through.
+
+**Blocked on:**
+
+| Blocker | Why it blocks this file |
+|---|---|
+| §4.4 — does the facade proxy pkg's catalogue? | Decides what the non-package-path branch does. Today it answers `404`, which §7.1 measured breaks `pkg update` outright. Cannot be written either way without the ruling. |
+| §4.5 — how the upstream mirror is configured | The upstream fetch has no URL to fetch from until this is settled. |
+
+**Not blocked on §5.3**, and §5.3 does not depend on this — they are different
+wires. §5.3 is the work to pick up.
+
+When it unblocks, the scope is: the upstream fetch path (streaming, no spool,
+no `[]byte` — ADR-003), the narrowed `404`/`502` semantics, `If-Modified-Since`
+relay (§6), and the contract comment at the top of the file. The document
+corrections that used to be listed here are **done** — see §1.
+
+A marker is in the file itself; `grep -rn 'BLOCKED (HANDOFF §5.7)' internal/`
+finds it.
 
 ## 6. Known defects
 
@@ -281,6 +384,10 @@ corrections listed in §1.
   correctly does not blacklist us — a dial failure never does — so the cost is
   one wasted attempt per peer, paid by the rest of the swarm. Worth knowing
   before reading a trial's peer logs and concluding the tracker is broken.
+- **`internal/daemon/facade.go` is BLOCKED and implements a superseded model.**
+  Its tests pass, which is misleading: they encode the old contract, so green
+  tests mean it is consistently wrong rather than correct. Frozen until §4.4 and
+  §4.5 are ruled — see §5.7.
 - **The facade has no answer for `If-Modified-Since`.** pkg sends conditional
   `GET`s for catalogue files. Ignoring the header wastes catalogue bandwidth on
   every `pkg update`; answering `304` from a guess would serve a stale

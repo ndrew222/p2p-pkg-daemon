@@ -125,6 +125,27 @@ agent will read it as a prohibition. Raised for the owner to settle: either
 carve out "corrections that propagate an approved ADR" or keep the prohibition
 absolute and route these through the owner.
 
+### 6. Deprecating the facade spec orphaned the path rule — RAISED, THEN HANDLED
+
+The owner ruled ADR-003 the facade spec's successor and deprecated v0.1. I
+checked before executing rather than after: **ADR-003 contains zero mentions of
+`All/`, `Hashed` or `hash10`.** It superseded the fetch semantics and nothing
+else. The path rule was the remainder, and it is measured, owner-ratified, and
+implemented in `facade.go`, `watcher.go`, `repodb.go` and three test files —
+with `facade.go:9` naming the deprecated document as its contract.
+
+Deprecating with nothing carrying the rule would have left shipped code mapping
+to no spec, which ground rule 1 forbids. I raised that in one sentence and then
+proceeded rather than blocking, because the deprecation was clearly right and
+the gap was fixable in the same change: the rule moves to **ADR-004**, drafted
+`Proposed`, explicitly introducing no new decision and deferring to the spec's
+text on any discrepancy.
+
+Deliberately not done: approving ADR-004 myself. ADRs are "vetted and approved
+by humans" per `AGENTS.md`, and ADR-003 went through the same draft-then-vet
+route. Until it is vetted, the deprecated spec's *Request surface* section
+remains load-bearing, and both the banner and HANDOFF say so.
+
 ## Incidental fixes
 
 - `AGENTS.md` precedence entry 3 and ground rule 3 both pointed at

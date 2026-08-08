@@ -1,4 +1,26 @@
-# Mirror Facade Spec — v0.1
+# Mirror Facade Spec — v0.1 — **DEPRECATED**
+
+> # ⛔ DEPRECATED — do not implement from this document.
+>
+> **Deprecated by the owner, 2026-08-08. `docs/adr/adr-003-facade-fetch-semantics.md` is its successor.** There is no v0.2 and none is planned; the facade is governed by ADRs from here.
+>
+> It was never binding in the first place — its own status block below records that it was drafted by an implementing agent rather than the spec owner, and that the status codes "remain open to revision". ADR-003 then overruled the fall-through model the whole document was built on.
+>
+> **Where its content went:**
+>
+> | Section | Now governed by |
+> |---|---|
+> | Fetch semantics, status codes, verification placement, no-cache rule | `docs/adr/adr-003-facade-fetch-semantics.md` |
+> | *Request surface* — the `All/` + `Hashed/` + `~hash10` path rule, and `GET`-only | `docs/adr/adr-004-facade-path-rule.md` **(Approved)** |
+> | Peer blacklist | UC-02 §7/§11c and `docs/logs/claude-peer-blacklist.md` |
+> | Open questions 6 and 7 (upstream mirror config; metadata proxying) | `docs/logs/HANDOFF.md` §4.5 and §4.4 — both still open |
+>
+> **The path rule in *Request surface* below is now governed by ADR-004 (Approved, 2026-08-08).** Shipped code depends on it (`internal/daemon/facade.go`, `watcher.go`, `repodb.go`), but ADR-004 is the specification to read; this section is retained as history. Everything in this document is now history: kept because it records why the design changed, not because it should be obeyed.
+>
+> Retained rather than deleted for the same reason the struck-through text inside it is retained — a reader who finds only the conclusion has nothing to stop them re-proposing the idea that was measured wrong.
+
+---
+
 
 *The pkg↔daemon HTTP surface (UC-02, UC-07). This is one of three separate
 wires: `tracker-protocol-spec-v0.2.md` governs daemon↔tracker and
@@ -305,11 +327,19 @@ expiry (nothing specifies one). See `docs/logs/claude-peer-blacklist.md`.
    this is called settled.
 
 6. **Which upstream mirror, and how it is configured.** ADR-003 requires a
-   configured upstream but deliberately leaves this open: a new config key, TLS
-   to that mirror, and the choice of mirror itself. Note that
-   `pkg+https://pkg.FreeBSD.org/${ABI}/quarterly` resolves via DNS SRV, so the
-   daemon must either resolve SRV itself or be pointed at a concrete host such
-   as `pkgmir.geo.freebsd.org`. **Owner decision — do not invent a key name.**
+   configured upstream but deliberately leaves this open: whether there is a new
+   config key at all, TLS to that mirror, and the choice of mirror itself.
+   **Owner decision — do not invent a key name.**
+
+   ~~`pkg+https://pkg.FreeBSD.org/${ABI}/quarterly` resolves via DNS SRV, so the
+   daemon must either resolve SRV itself or be pointed at a concrete host.~~
+   **Wrong — measured 2026-08-08.** `pkg.FreeBSD.org` is a CNAME to
+   `pkgmir.geo.FreeBSD.org` with ordinary A and AAAA records, so Go's stdlib
+   HTTP client reaches it unaided; and `_https._tcp.pkg.FreeBSD.org` holds a
+   single SRV target (`10 10 443 pkgmir.geo.freebsd.org.`) naming that same
+   host on the standard port. SRV buys nothing plain DNS does not. Do not
+   hand-roll a resolver. See `docs/logs/HANDOFF.md` §4.5 for the candidate of
+   discovering the URL from `/etc/pkg/FreeBSD.conf` rather than adding a key.
 
 7. **Metadata proxying.** See the flag under *Request surface*. ADR-003 makes
    jmj pkg's only mirror, which appears to force it, while this spec and UC-07
