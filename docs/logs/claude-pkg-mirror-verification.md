@@ -308,6 +308,25 @@ if __name__ == "__main__":
 
 ### Repo configs to test
 
+**Footgun before you write either of these.** Repositories are keyed **by name**,
+and `/usr/local/etc/pkg/repos/*.conf` is read *after* `/etc/pkg/FreeBSD.conf`.
+A block named `FreeBSD-ports` therefore **replaces** the stock definition rather
+than adding to it — it is the same mechanism the stock file's own header comment
+uses to disable a repo. That is deliberate for mechanism (2) below, which needs
+pkg to take its mirror list from the probe for that repository. But get the block
+wrong and the host has no working ports repository until the file is removed.
+Recovery is `rm` the file plus `pkg update -f`; nothing in `/etc/pkg` is touched
+either way, which is what makes it recoverable.
+
+Mechanism (3) uses a *new* name (`jmjprobe`), so it adds a repository and leaves
+the stock one intact. That asymmetry between the two configs is the point of the
+experiment, not an inconsistency.
+
+Do not create `/usr/local/etc/pkg/repos/` speculatively and leave it empty. pkg
+globs `*.conf` out of it, so an empty directory changes nothing — and its
+*absence* is currently the evidence that this host is a clean baseline (see
+recon finding (a)). Creating it early destroys that evidence and buys nothing.
+
 Mechanism (2), `mirror_type: "http"` — the daemon serves the ordered list:
 
 ```
