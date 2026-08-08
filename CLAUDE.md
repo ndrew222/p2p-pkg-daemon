@@ -57,7 +57,7 @@ This is the single most important structural fact, and "unifying" them is an exp
 | Wire | Path surface | Contract |
 |---|---|---|
 | daemon ↔ tracker | `POST /announce`, `POST /ping`, `GET /peers?pkg=<name-version>` | `docs/tracker-protocol-spec-v0.2.md` (encoding) + `docs/protocol-spec-v0.1.md` (semantics) |
-| pkg → daemon (facade) | `…/All/[Hashed/]<name-version>[~hash10].pkg`, plus every non-package path | **ADRs only — no spec file.** ADR-003 (fetch semantics, status codes), ADR-004 (path rule), ADR-005 (metadata is proxied) |
+| pkg → daemon (facade) | `…/All/[Hashed/]<name-version>[~hash10].pkg`, plus every non-package path | **ADRs only — no spec file.** ADR-003 (fetch semantics, status codes), ADR-004 (path rule), ADR-005 (metadata is proxied), ADR-007 (jmj fronts one repository) |
 | daemon ↔ daemon (peer) | `GET /pkg/<name-version>` | `docs/peer-transfer-spec-v0.2.md` |
 
 The peer namespace is deliberately unlike the facade's so that a seeding daemon cannot be mistaken for, or used as, a pkg mirror.
@@ -99,6 +99,7 @@ Each of these has already cost someone a session (full list in `AGENTS.md` and H
 - **No global package size cap.** The bound is the exact expected size from the repo DB, which is stricter than any constant and has no ceiling. The constant that used to exist blocked 1.3% of the repository outright — llvm, rust, chromium, libreoffice.
 - **Constant memory on both ends of a transfer.** The requester streams to a temp file and hashes incrementally; the seeder serves from an open file handle. A `[]byte` in either signature is a regression, and is what currently OOMs a 1 GiB host on the 2.83 GiB package.
 - **No stall detectors, minimum-throughput rules, or transfer deadlines.** A slow peer is out of scope exactly as a slow mirror is. No throttling, bandwidth management, or NAT traversal either (ADR-001) — though that is a scope ruling, not a ban on thinking: if you observe a real problem rate control solves, make the case openly rather than smuggling one in, and equally do not cite it as a reason to leave a genuine defect unfixed.
+- **A successful repository-database lookup is not proof the upstream can serve that package.** `repo_db_dir` is scanned for *every* catalogue, but jmj fronts exactly one repository (ADR-007), so `Repositories` will happily return a hash for a package `upstream_url` cannot fetch. pkg never asks for those, so the path is unreachable — but the two predicates are not the same, and §5.7 must not conflate them.
 - **A nil `*Repositories` assigned into an interface field is a non-nil interface holding a nil pointer** — every `== nil` check downstream passes and the first call panics. Both wiring sites go through `Daemon.repository()` for this reason; `TestStartHTTPServerRefusesWithoutARepositoryDatabase` is the regression test.
 - **PlantUML:** square brackets in an `alt`/`else` label parse as a link and eat the first word; angle brackets in a note body parse as markup. Render and look at it before committing.
 - **Do not claim a fact about a system you have not inspected.** An earlier session invented a cache layout and the owner caught it. A plausible self-attributed cause is not a control either.

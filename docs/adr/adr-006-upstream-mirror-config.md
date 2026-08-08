@@ -70,11 +70,11 @@ Two rules the measurement forced, both of which prevent the warning from crying 
 
 Implemented in `internal/daemon/upstreamcheck.go`; it does not block §5.7.
 
-## Open question this raised — NOT decided here
+## Open question this raised — SETTLED by ADR-007
 
-**jmj has one `upstream_url`; a stock host has more than one enabled repository.** Measured: FreeBSD 15.1 ships `FreeBSD-ports` and `FreeBSD-ports-kmods` both enabled, on different URLs, plus a disabled `FreeBSD-base`. ADR-003 requires jmj to be pkg's *only enabled* repository, so configuring jmj means the other repositories stop being available — a host that used kernel modules from `FreeBSD-ports-kmods` loses them.
+**jmj has one `upstream_url`; a stock host has more than one enabled repository.** Measured: FreeBSD 15.1 ships `FreeBSD-ports` and `FreeBSD-ports-kmods` both enabled, on different URLs, plus a disabled `FreeBSD-base`. Recorded as `HANDOFF.md` §4.6 and left open here (ground rule 3).
 
-Nothing in ADR-003, -005 or this ADR addresses multi-repository hosts, and this ADR does not invent an answer (ground rule 3). Recorded as `HANDOFF.md` §4.6.
+**Resolved by ADR-007, which found the question rested on an error in this ADR.** The sentence originally here claimed *"ADR-003 requires jmj to be pkg's only enabled repository"*. ADR-003 does not say that — it says jmj becomes pkg's only **mirror** rather than its first, and mirrors-versus-repositories is the distinction ADR-003 is at pains to draw. jmj fronts one repository, replaces that one, and coexists with the rest; `upstream_url` staying singular is therefore correct rather than a limitation. Nothing in this ADR changes.
 
 ## Consequences
 

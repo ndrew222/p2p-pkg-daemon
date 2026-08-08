@@ -56,21 +56,20 @@ commit as the work.
 
 Current branch: `main`; everything through `bc5fabf` is merged.
 
-ADR-001 through -005 are all Approved, and **§5.3 is the next work item and is
+ADR-001 through -007 are all Approved, and **§5.3 is the next work item and is
 fully unblocked.**
 
-**§4.4 and §4.5 are both closed** (ADR-005 and ADR-006, ruled 2026-08-08).
-**No work is blocked.** §5.7 — the facade rework — is unblocked for the first
-time, and is now the largest open item alongside §5.3.
-
-**One new non-blocking question is open for the owner: §4.6**, raised from
-direct measurement of the reference host. jmj has a single `upstream_url` but a
-stock host has two enabled repositories on different URLs, so adopting jmj
-silently drops the others.
+**§4.4, §4.5 and §4.6 are all closed** (ADR-005, ADR-006 and ADR-007, ruled
+2026-08-08). **No work is blocked and no question is open for the owner.** §5.7
+— the facade rework — is unblocked for the first time, and is now the largest
+open item alongside §5.3.
 
 Read before starting §5.7: ADR-003 (fetch semantics), ADR-004 (path rule),
-ADR-005 (metadata is proxied) and ADR-006 (`upstream_url`). The key exists,
-validates and expands; nothing consumes it yet.
+ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj fronts
+one repository and coexists with the rest). The key exists, validates and
+expands; nothing consumes it yet. ADR-007 carries one trap into the rework: a
+successful repository-database lookup is **not** proof the upstream can serve
+that package.
 
 ## 1. Document map — what to trust
 
@@ -85,6 +84,7 @@ validates and expands; nothing consumes it yet.
 | `docs/adr/adr-004-facade-path-rule.md` | **Approved.** Carries the `All/` + `Hashed/` + `~hash10` path rule out of the deprecated facade spec. Introduces no new decision; if it differs from that spec's text, the spec wins. |
 | `docs/adr/adr-005-metadata-proxying.md` | **Approved.** The facade proxies non-package paths to the configured upstream and relays the response, including `304`. Closes §4.4; retires *"never proxies metadata"*. |
 | `docs/adr/adr-006-upstream-mirror-config.md` | **Approved and implemented** (the key, not its consumer). `upstream_url` in jmj's config: required, no default, `${ABI}` expanded at startup, plaintext warned not refused. Closes §4.5. |
+| `docs/adr/adr-007-repository-topology.md` | **Approved.** jmj fronts one repository, replaces that one, coexists with every other enabled repository. `upstream_url` stays singular. Closes §4.6; corrects a misreading of ADR-003 in §4.6 and ADR-006. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
@@ -413,44 +413,46 @@ there: a fourth wrinkle beyond the three above — deleting the stock block, whi
 is the natural way to disable a repository, leaves discovery nothing to find,
 so discovery couples jmj to *how* the operator disables the stock repo.
 
-### 4.6 jmj has one upstream; a stock host has several repositories — **NEEDS AN OWNER RULING**
+### 4.6 jmj has one upstream; a stock host has several repositories — **CLOSED (ADR-007)**
 
-Raised 2026-08-08 from direct measurement of the reference host, while
-implementing ADR-006's cross-check. Not urgent, and **it does not block §5.7**,
-but it is a real hole in the model rather than a detail.
+Raised 2026-08-08 while implementing ADR-006's cross-check; ruled the same day.
+Open for one working session. **It rested on an error, which was mine.**
 
-`upstream_url` is a single URL. A stock FreeBSD 15.1 host has **two enabled
-repositories on different URLs**, plus one disabled:
+The question as raised assumed *"ADR-003 requires jmj to be pkg's only enabled
+repository"*, and concluded that adopting jmj silently drops the others.
+**ADR-003 says no such thing.** It says jmj becomes pkg's only *mirror* rather
+than its first — and mirrors-versus-repositories is precisely the distinction
+ADR-003's Context section exists to draw. Collapsing the two words invented a
+constraint and then spent an open question on it.
 
-```
-FreeBSD-ports        pkg+https://pkg.FreeBSD.org/${ABI}/quarterly                enabled
-FreeBSD-ports-kmods  pkg+https://pkg.FreeBSD.org/${ABI}/kmods_quarterly_${VERSION_MINOR}   enabled
-FreeBSD-base         pkg+https://pkg.FreeBSD.org/${ABI}/base_release_${VERSION_MINOR}      disabled
-```
+**ADR-007 rules: jmj fronts one repository, replaces that one, and coexists with
+the rest.** Other enabled repositories are left exactly as they are and continue
+to fetch directly. `upstream_url` stays a single URL, which is now the accurate
+expression of the model rather than a limitation of it.
 
-ADR-003 requires jmj to be pkg's **only enabled** repository. So switching a
-host to jmj means the other repositories stop existing for it: a host using
-kernel modules from `FreeBSD-ports-kmods` loses them, silently, because pkg
-simply never learns about that repository again.
+Coexistence needs no cross-repository fall-through, which is the mechanism
+ADR-003 measured as absent. Because the facade proxies upstream on a peer miss,
+jmj never `404`s for anything in its own catalogue, so there is no failure for a
+second repository to absorb. What multi-repository operation actually uses is
+**solve-time selection**, which ADR-003 affirms in the same breath as it denies
+retry.
 
-Note this is not the facade's problem to solve at request time — the facade
-cannot even tell the repositories apart, since ADR-004's path rule deliberately
-ignores everything before `All/`, so a kmods package and a ports package are
-indistinguishable requests. Whatever the answer is, it is a configuration-shaped
-decision, not a routing one.
+Two measurements worth keeping (full set in
+`docs/logs/claude-multi-repository.md`):
 
-**Options, none chosen:** declare multi-repository hosts out of scope and say so
-in the README; allow `upstream_url` to be a list and have the facade try each
-in order; or keep one upstream and accept losing the others. **Do not pick one
-— `AGENTS.md` ground rule 3.**
+- **`FreeBSD-ports` and `FreeBSD-ports-kmods` share 238 of 239 package names**,
+  differing only in version. The intuition that they are disjoint is false.
+  Exactly one package is kmods-exclusive: `drm-latest-kmod`.
+- **They share zero name-*versions*.** That is the figure that matters, because
+  name-version is what ADR-004's path rule keys on — so jmj holding both
+  catalogues under `repo_db_dir` creates no ambiguity in the identifier the
+  facade actually uses.
 
-**What it blocks:** nothing today. **What it costs to leave:** an operator on a
-stock 15.1 host loses the kmods repository with no warning at the moment they
-adopt jmj. **What unblocks it:** one ADR, or an explicit scope ruling.
-
-The ADR-006 cross-check partially mitigates it: pointing `upstream_url` at a
-repository pkg does not use produces a warning naming every repository it does
-use, so the kmods URL is at least visible to the operator at that moment.
+**Carried into §5.7:** jmj's repository-database view is *broader* than its
+upstream. `Repositories` will return a hash for a package belonging to a
+repository jmj does not front, which its `upstream_url` cannot serve. That path
+is unreachable under ADR-007 — pkg never asks — but a successful hash lookup is
+**not** proof the upstream will answer, and the rework must not assume it is.
 
 ## 5. Work, in order
 
@@ -538,6 +540,7 @@ fetch from a configured upstream mirror and stream the bytes through.
 |---|---|
 | ~~§4.4 — does the facade proxy pkg's catalogue?~~ | **RULED — ADR-005: it proxies.** The non-package branch is now specified: fetch from upstream and relay. No longer a blocker. |
 | ~~§4.5 — how the upstream mirror is configured~~ | **RULED — ADR-006, and implemented.** `cfg.UpstreamURL` is populated, validated and `${ABI}`-expanded by the time the daemon starts. No longer a blocker. |
+| ~~§4.6 — one `upstream_url` vs. several enabled repositories~~ | **RULED — ADR-007: jmj fronts one repository and coexists with the rest.** The question rested on a misreading of ADR-003 (*mirror* ≠ *repository*). Config schema unchanged. Never blocked anything. |
 
 **Nothing blocks this file any more.** It is frozen only in the sense that it
 has not been rewritten yet — the rulings it was waiting on have all landed.
