@@ -44,7 +44,7 @@ fully unblocked.**
 **One thing is blocked on an owner decision: whether the facade proxies pkg's
 metadata.** It surfaced while bringing the specs into line with ADR-003 and it
 is not a detail — UC-07 is built end to end on a fall-through that does not
-exist, so as written it cannot be implemented at all. See §4.1.
+exist, so as written it cannot be implemented at all. See §4.4.
 
 ## 1. Document map — what to trust
 
@@ -153,10 +153,25 @@ All settled and documented elsewhere. Read the linked document, not a summary.
 
 §4.1, §4.2 and §4.3 were the standing blockers. All three are resolved — §4.2 by
 ADR-002, the other two by the verification rulings. The numbers are retained
-because other documents cite them. §4.1's number is reused below for the one
-live blocker; the cache-layout question it originally named is closed (§5.6).
+because other documents cite them — §4.1 from `claude-config-schema.md` and
+`claude-verification-rulings.md`, §4.2 from **ADR-002 twice**, and §4.3 from
+`internal/daemon/facade.go:59` and `internal/daemon/repository.go:19`. **Do not
+reuse §4.1–§4.3 for new items.** New blockers take fresh numbers from §4.4.
 
-### 4.1 Does the facade proxy pkg's metadata? — **NEEDS AN OWNER RULING**
+### 4.4 Does the facade proxy pkg's metadata? — **NEEDS AN OWNER RULING**
+
+**"Metadata" here means the repository catalogue files, not any hash.** Concretely
+the non-package paths in the facade's own list: `meta.conf`, `packagesite.pkg`,
+`data.pkg`, directory listings and `/`. These are whole-repository documents that
+pkg downloads during `pkg update` — `packagesite.pkg` is the signed catalogue
+carrying all 37,789 package records, and it is the root of the integrity model.
+
+It is **not** the `~hash10` suffix or `packages.cksum`. Those are per-package
+identifiers on the package-file path (`All/Hashed/foo-1.0~ae9dce33aa.pkg`, and
+the 64-char lowercase hex SHA-256 in the repository database row), they belong to
+the *ratified* path rule, and nothing in ADR-003 touches them. The question below
+is about a different class of request entirely: what the facade does when pkg
+asks it for the catalogue rather than for a package.
 
 Two ratified statements now contradict each other and no ADR settles it.
 
@@ -190,7 +205,7 @@ Flagged in place at `docs/mirror-facade-spec-v0.1.md` (open question 7 and a
 warning under *Request surface*) and at UC-07's description, so nobody
 implements either reading by accident.
 
-### 4.2 Which upstream mirror, and what the config key is called
+### 4.5 Which upstream mirror, and what the config key is called
 
 ADR-003 requires a configured upstream and deliberately leaves the key name, the
 TLS decision and the choice of mirror open. Note that
