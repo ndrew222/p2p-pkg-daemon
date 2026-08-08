@@ -56,13 +56,17 @@ commit as the work.
 
 Current branch: `main`; everything through `bc5fabf` is merged.
 
-ADR-001, -002 and -003 are all Approved, and **§5.3 is the next work item and is
+ADR-001 through -005 are all Approved, and **§5.3 is the next work item and is
 fully unblocked.**
 
-**One thing is blocked on an owner decision: whether the facade proxies pkg's
-metadata.** It surfaced while bringing the specs into line with ADR-003 and it
-is not a detail — UC-07 is built end to end on a fall-through that does not
-exist, so as written it cannot be implemented at all. See §4.4.
+**§4.4 is closed** — the owner ruled on 2026-08-08 that the facade proxies
+metadata, recorded as ADR-005, and UC-07 is rewritten around it. **One thing
+remains blocked on an owner decision: how the upstream mirror is configured
+(§4.5).** It is the last blocker on §5.7. A tradeoff analysis of the two
+candidate mechanisms — an explicit config key versus discovering the URL from
+pkg's own `/etc/pkg/FreeBSD.conf` — is in
+`docs/logs/claude-upstream-mirror-config.md`; it deliberately recommends
+without deciding.
 
 ## 1. Document map — what to trust
 
@@ -75,6 +79,7 @@ exist, so as written it cannot be implemented at all. See §4.4.
 | `docs/adr/adr-002-serving-side-concurrency.md` | **Approved.** Global *and* per-remote-IP semaphores, `503` when either is full, default `0` = unlimited. Implement with §5.3. |
 | `docs/adr/adr-003-facade-fetch-semantics.md` | **Approved.** Facade proxies to upstream on a peer miss; peer path spools, upstream path streams; no facade cache. |
 | `docs/adr/adr-004-facade-path-rule.md` | **Approved.** Carries the `All/` + `Hashed/` + `~hash10` path rule out of the deprecated facade spec. Introduces no new decision; if it differs from that spec's text, the spec wins. |
+| `docs/adr/adr-005-metadata-proxying.md` | **Approved.** The facade proxies non-package paths to the configured upstream and relays the response, including `304`. Closes §4.4; retires *"never proxies metadata"*. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
@@ -192,7 +197,31 @@ because other documents cite them — §4.1 from `claude-config-schema.md` and
 `internal/daemon/facade.go:59` and `internal/daemon/repository.go:19`. **Do not
 reuse §4.1–§4.3 for new items.** New blockers take fresh numbers from §4.4.
 
-### 4.4 Does the facade proxy pkg's metadata? — **NEEDS AN OWNER RULING**
+### 4.4 Does the facade proxy pkg's metadata? — **RULED. Yes.** (ADR-005)
+
+**Closed 2026-08-08 by owner ruling, recorded in
+`docs/adr/adr-005-metadata-proxying.md` (Approved).** The facade fetches
+non-package paths from the configured upstream mirror and relays them —
+streamed, uncached, unverified, unmodified, with `If-Modified-Since`/`304`
+relayed unchanged. The sentence that gave way is *"the daemon never serves,
+caches or proxies metadata"*; *"the signed catalog comes from a real mirror"*
+survives, because relaying is not vouching and pkg verifies the signature
+itself.
+
+Propagated to UC-07 (rewritten — steps 3–5 and a new upstream-failure flow),
+`AGENTS.md`, and the deprecated facade spec's four flags. **§5.7 is now blocked
+on §4.5 alone.** Note two consequences worth carrying into the rework: the
+facade becomes a general reverse proxy for non-package paths, so the loopback
+enforcement on `facade_addr` is load-bearing and must not be relaxed; and a
+proxied path is client-supplied, so joining it to the upstream base URL must
+not permit escaping that base.
+
+The original statement of the problem follows, retained because it records why
+the rule changed.
+
+---
+
+#### Original blocker text (historical)
 
 **"Metadata" here means the repository catalogue files, not any hash.** Concretely
 the non-package paths in the facade's own list: `meta.conf`, `packagesite.pkg`,
@@ -359,8 +388,8 @@ fetch from a configured upstream mirror and stream the bytes through.
 
 | Blocker | Why it blocks this file |
 |---|---|
-| §4.4 — does the facade proxy pkg's catalogue? | Decides what the non-package-path branch does. Today it answers `404`, which §7.1 measured breaks `pkg update` outright. Cannot be written either way without the ruling. |
-| §4.5 — how the upstream mirror is configured | The upstream fetch has no URL to fetch from until this is settled. |
+| ~~§4.4 — does the facade proxy pkg's catalogue?~~ | **RULED — ADR-005: it proxies.** The non-package branch is now specified: fetch from upstream and relay. No longer a blocker. |
+| §4.5 — how the upstream mirror is configured | **The only remaining blocker.** Both the package-miss path and the metadata path fetch from upstream, and neither has a URL until this is settled. Tradeoff analysis: `docs/logs/claude-upstream-mirror-config.md`. |
 
 **Not blocked on §5.3**, and §5.3 does not depend on this — they are different
 wires. §5.3 is the work to pick up.
@@ -386,12 +415,17 @@ finds it.
   before reading a trial's peer logs and concluding the tracker is broken.
 - **`internal/daemon/facade.go` is BLOCKED and implements a superseded model.**
   Its tests pass, which is misleading: they encode the old contract, so green
-  tests mean it is consistently wrong rather than correct. Frozen until §4.4 and
-  §4.5 are ruled — see §5.7.
+  tests mean it is consistently wrong rather than correct. Frozen until §4.5 is
+  ruled — see §5.7. Note that ADR-005 has now made the *metadata* branch a known
+  defect rather than an open question: it answers `404`, which §7.1 measured
+  breaks `pkg update` outright, and it must relay from upstream instead. The
+  tests that encode the refusal (`facade_test.go:91`, `:189`, `:354`, and
+  `daemon_test.go:187`, which uses a metadata path as its probe) go with it.
 - **The facade has no answer for `If-Modified-Since`.** pkg sends conditional
   `GET`s for catalogue files. Ignoring the header wastes catalogue bandwidth on
   every `pkg update`; answering `304` from a guess would serve a stale
-  catalogue. ADR-003's proxying resolves this for free, but is unimplemented.
+  catalogue. ADR-003's proxying resolves this for free and ADR-005 now requires
+  the relay explicitly, but it is unimplemented.
 
 ## 7. Empirical findings — §7.1–§7.5 are ANSWERED
 

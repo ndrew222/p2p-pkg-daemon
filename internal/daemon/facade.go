@@ -7,7 +7,8 @@ package daemon
 // upstream mirror when no peer can supply them. pkg is never modified.
 //
 // Contract: docs/adr/adr-003-facade-fetch-semantics.md for fetch semantics and
-// status codes, docs/adr/adr-004-facade-path-rule.md for the path rule.
+// status codes, docs/adr/adr-004-facade-path-rule.md for the path rule,
+// docs/adr/adr-005-metadata-proxying.md for the non-package branch.
 // docs/mirror-facade-spec-v0.1.md is DEPRECATED — do not treat it as the
 // contract.
 //
@@ -24,12 +25,18 @@ package daemon
 // evidence this file is correct — they are evidence it is consistently wrong.
 //
 // ADR-003 replaces the error path with a fetch from a configured upstream
-// mirror, streamed through without spooling. That rework is blocked on two
-// owner rulings, both in HANDOFF.md:
+// mirror, streamed through without spooling. ADR-005 (Approved) then settled
+// the other branch: the facade PROXIES metadata, so the 404 this file returns
+// for every non-package path is now a known defect rather than an open
+// question -- it breaks `pkg update` outright (§7.1). The tests below that
+// assert the refusal encode the retired rule and go with it.
 //
-//	§4.4  does the facade proxy pkg's catalogue?  -> decides the non-package
-//	      branch, which today answers 404 and breaks `pkg update` outright
-//	§4.5  how is the upstream mirror configured?  -> the fetch has no URL yet
+// The rework is now blocked on ONE owner ruling, in HANDOFF.md:
+//
+//	§4.5  how is the upstream mirror configured?  -> both the package-miss
+//	      path and the metadata path fetch from upstream, and neither has a
+//	      URL until this is settled. Tradeoffs:
+//	      docs/logs/claude-upstream-mirror-config.md
 //
 // Not blocked on, and not blocking, §5.3 (the peer wire) — different surface.
 //

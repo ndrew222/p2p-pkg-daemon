@@ -57,7 +57,7 @@ This is the single most important structural fact, and "unifying" them is an exp
 | Wire | Path surface | Contract |
 |---|---|---|
 | daemon ↔ tracker | `POST /announce`, `POST /ping`, `GET /peers?pkg=<name-version>` | `docs/tracker-protocol-spec-v0.2.md` (encoding) + `docs/protocol-spec-v0.1.md` (semantics) |
-| pkg → daemon (facade) | `…/All/[Hashed/]<name-version>[~hash10].pkg` | **ADRs only — no spec file.** ADR-003 (fetch semantics, status codes), ADR-004 (path rule) |
+| pkg → daemon (facade) | `…/All/[Hashed/]<name-version>[~hash10].pkg`, plus every non-package path | **ADRs only — no spec file.** ADR-003 (fetch semantics, status codes), ADR-004 (path rule), ADR-005 (metadata is proxied) |
 | daemon ↔ daemon (peer) | `GET /pkg/<name-version>` | `docs/peer-transfer-spec-v0.2.md` |
 
 The peer namespace is deliberately unlike the facade's so that a seeding daemon cannot be mistaken for, or used as, a pkg mirror.
@@ -86,7 +86,7 @@ The daemon writes **only** to its own `temp_dir`. The pkg cache and the reposito
 
 ## Current state — read HANDOFF.md before picking anything up
 
-- **`internal/daemon/facade.go` is frozen (HANDOFF §5.7).** It implements a model that was *measured false*: it returns an HTTP error on a peer miss, assuming pkg falls through to another mirror. pkg does not — fall-through happens between mirrors within a repository, never between repositories, so a facade error ends the install. **Its tests pass, which is misleading**: they encode the old contract, so green means consistently wrong, not correct. Blocked on owner rulings §4.4 (does the facade proxy pkg's catalogue?) and §4.5 (how the upstream mirror is configured). Do not extend, tune, or partially migrate it. The path rule in that file is unaffected and correct — do not "fix" it.
+- **`internal/daemon/facade.go` is frozen (HANDOFF §5.7).** It implements a model that was *measured false*: it returns an HTTP error on a peer miss, assuming pkg falls through to another mirror. pkg does not — fall-through happens between mirrors within a repository, never between repositories, so a facade error ends the install. **Its tests pass, which is misleading**: they encode the old contract, so green means consistently wrong, not correct. Blocked on owner ruling §4.5 (how the upstream mirror is configured) — the last one. Do not extend, tune, or partially migrate it. Its metadata branch answers `404`, which ADR-005 has now made a *known defect* rather than an open question: the facade proxies metadata. The path rule in that file is unaffected and correct — do not "fix" it.
 - **The seed half does not exist.** No production `PackageSource` implementation is in the tree; the only implementors are test fakes and `cmd/demo`'s in-memory store. The daemon announces a serving port nothing listens on.
 - **§5.3 (peer wire migration) is the next work item and is fully unblocked** — and it is a build, not just a migration. Deleting `internal/peerwire` before its size bound is replaced is explicitly forbidden: `MaxPayload` is today the only length check on the fetch path.
 - `docs/mirror-facade-spec-v0.1.md` is **deprecated** — history only, never binding, superseded by ADR-003/ADR-004. There is no v0.2 and none is planned. Do not implement from it or cite it as a contract.
