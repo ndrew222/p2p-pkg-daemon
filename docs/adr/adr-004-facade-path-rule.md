@@ -1,6 +1,6 @@
 # ADR-004: The facade's package-file path rule
 
-**Status:** Proposed — drafted 2026-08-08 to carry a ratified rule out of a deprecated document. **Not yet vetted by the owner.**
+**Status:** Approved by Andrew
 
 Carries forward, unchanged, the *Request surface* section of `docs/mirror-facade-spec-v0.1.md`, which is being deprecated. This ADR introduces **no new decision**. If it says anything the deprecated spec did not, that is a drafting error and the spec's text wins.
 
