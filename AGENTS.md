@@ -12,13 +12,14 @@ read the README and `docs/` instead; this file assumes you are an agent.
 
 ## Authoritative documents, in precedence order
 
-1. `docs/tracker-protocol-spec-v0.2.md` — wire format (HTTP + JSON): endpoints, status codes, JSON shapes. **If this file does not exist yet, all wire-level code is blocked. Stop and wait.** v0.1 remains authoritative for protocol *semantics* (message meanings, state, life cycle, robustness requirements).
-2. `docs/tracker-protocol-spec-v0.1.md` — tracker semantics and definition of done.
-3. `docs/peer-transfer-spec-v0.2.md` — the daemon↔daemon wire for package bytes (UC-02 fetch loop, UC-06 serving side): HTTP over TCP, `GET /pkg/<name-version>`, status codes, the size and hash bound, buffering and timeouts.
-4. `docs/mirror-facade-spec-v0.1.md` — the pkg↔daemon wire (UC-02, UC-07): the `All/<name-version>.pkg` path rule and facade status codes.
-5. `docs/use-case-descriptions.md` — UC-01 … UC-07 behaviour spec.
-6. `docs/uc-*.puml` — authoritative where the prose is ambiguous.
-7. `README.md` — orientation only.
+1. `docs/adr/adr*.md` - Architectural design records. Have the highest priority as they are atomic design decisions vetted and approved by humans with rationale documented.
+2. `docs/tracker-protocol-spec-v0.2.md` — wire format (HTTP + JSON): endpoints, status codes, JSON shapes. **If this file does not exist yet, all wire-level code is blocked. Stop and wait.** v0.1 remains authoritative for protocol *semantics* (message meanings, state, life cycle, robustness requirements).
+3. `docs/tracker-protocol-spec-v0.1.md` — tracker semantics and definition of done.
+4. `docs/peer-transfer-spec-v0.2.md` — the daemon↔daemon wire for package bytes (UC-02 fetch loop, UC-06 serving side): HTTP over TCP, `GET /pkg/<name-version>`, status codes, the size and hash bound, buffering and timeouts.
+5. `docs/mirror-facade-spec-v0.1.md` — the pkg↔daemon wire (UC-02, UC-07): the `All/<name-version>.pkg` path rule and facade status codes.
+6. `docs/use-case-descriptions.md` — UC-01 … UC-07 behaviour spec.
+7. `docs/uc-*.puml` — authoritative where the prose is ambiguous.
+8. `README.md` — orientation only.
 
 These are **three separate wires** and they do not share a path grammar. The peer wire's `/pkg/<name-version>` namespace is deliberately unlike the facade's `…/All/<name-version>.pkg` so that a seeding daemon cannot be mistaken for, or used as, a pkg mirror. Do not "unify" them.
 
