@@ -39,7 +39,9 @@ Three properties of the expansion matter and are not negotiable details:
 2. **`pkg` is executed only if the value actually contains `${ABI}`.** A literal URL never shells out. This keeps the daemon exercisable on a non-FreeBSD box, which `cache_dir` and `repo_db_dir` are already overridable for.
 3. **Failure to resolve is fatal.** If the value needs `${ABI}` and `pkg config abi` cannot supply one, the daemon refuses to start and names the field. Proxying from a URL with an unexpanded placeholder in it is the bad outcome.
 
-Only `${ABI}` is expanded. pkg may support other variables in repository URLs; that set has not been measured, and a config using one will fail the placeholder check rather than being silently mis-expanded.
+Only `${ABI}` is expanded. **Measured on the reference host, `pkg.conf(5)` documents seven variables** — `ABI`, `OSNAME`, `RELEASE`, `VERSION_MAJOR`, `VERSION_MINOR`, `OSVERSION`, `ARCH` — and the stock `/etc/pkg/FreeBSD.conf` really does use `${VERSION_MINOR}`, in the `FreeBSD-ports-kmods` and `FreeBSD-base` URLs. The repository that matters here, `FreeBSD-ports`, uses `${ABI}` alone.
+
+That measurement is why the refusal above is not merely defensive: a config pointed at the kmods or base repository genuinely will carry a variable jmj does not expand, and it will be refused with a message naming it rather than proxied with a literal `${VERSION_MINOR}` in the path.
 
 ### Plaintext upstream is warned about, not refused
 
@@ -51,9 +53,28 @@ A scheme other than `http` or `https` is rejected. A value beginning `pkg+` — 
 
 The silent-mismatch failure mode ADR-005 created is handled by a **warning, not a hard check**. The daemon may compare its configured upstream against what pkg's own configuration says, and log a prominent warning if they disagree — but it must not refuse to start on that basis, and it must not fail if the comparison cannot be made.
 
-The check is explicitly **best-effort, and its fragility must not become load-bearing.** The owner has ruled that grepping pkg's config, together with `pkg config abi`, is acceptable for this purpose — no UCL parser is required. If the file is absent, unreadable, or does not yield a URL, the daemon says nothing and carries on. The worst outcome of a failed comparison is a missing warning.
+The check is explicitly **best-effort, and its fragility must not become load-bearing.** If the source is absent, unreadable, or does not yield a URL, the daemon says nothing and carries on. The worst outcome of a failed comparison is a missing warning.
 
-This is deliberately *not* implemented as part of the key, and does not block §5.7.
+**The comparison source is the repository database, not pkg's config file.** This ADR originally anticipated grepping `/etc/pkg/FreeBSD.conf`, which the owner had ruled acceptable. Measured on the reference host, there is a strictly better source that needs no parsing at all: pkg records the upstream in the repository database itself, in a `repodata` key/value table, **already expanded** —
+
+```
+packagesite | pkg+https://pkg.FreeBSD.org/FreeBSD:15:amd64/quarterly
+```
+
+— and that database is one the daemon already opens read-only for hashes and sizes. No UCL, no grep, no second file, and no dependence on pkg's multi-file shadowing rules. The `pkg+` prefix is stripped for comparison.
+
+Two rules the measurement forced, both of which prevent the warning from crying wolf:
+
+1. **A loopback source is ignored.** Once the operator has switched pkg over to jmj, pkg records *our* address in `repodata`, which says nothing about the real repository behind it. The check therefore does its work at the moment it is useful — the first start after switching, while the catalogue on disk is still the one the stock configuration fetched.
+2. **The test is "matches none", not "matches all".** A stock FreeBSD 15.1 host has **two** enabled repositories with different URLs (`…/quarterly` and `…/kmods_quarterly_1`), so a per-catalogue comparison warns on every start of a *correctly* configured daemon. One catalogue agreeing is enough. See the open question below.
+
+Implemented in `internal/daemon/upstreamcheck.go`; it does not block §5.7.
+
+## Open question this raised — NOT decided here
+
+**jmj has one `upstream_url`; a stock host has more than one enabled repository.** Measured: FreeBSD 15.1 ships `FreeBSD-ports` and `FreeBSD-ports-kmods` both enabled, on different URLs, plus a disabled `FreeBSD-base`. ADR-003 requires jmj to be pkg's *only enabled* repository, so configuring jmj means the other repositories stop being available — a host that used kernel modules from `FreeBSD-ports-kmods` loses them.
+
+Nothing in ADR-003, -005 or this ADR addresses multi-repository hosts, and this ADR does not invent an answer (ground rule 3). Recorded as `HANDOFF.md` §4.6.
 
 ## Consequences
 

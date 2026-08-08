@@ -172,7 +172,39 @@ repository database, a plaintext upstream is a privacy and tamper-*detection*
 question, not an integrity hole — tampering is caught either way. That argues
 for defaulting to `https` and warning on `http`, rather than refusing it.
 
+## MEASURED, 2026-08-08 — the list below is now settled
+
+The owner granted SSH access to the reference host after this document was
+written, and every item was checked. **Results first; the original list follows
+unchanged so the reasoning stays legible.**
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | A maintained Go UCL parser? | **Moot.** Item 4 removed the need to parse UCL at all. |
+| 2 | Does the repo DB carry the ABI? | **Not cleanly.** `packages.arch` holds `FreeBSD:15:amd64` for 22,197 rows but `FreeBSD:15:*` for 15,592 — the wildcard form makes it a bad ABI source. `pkg config abi` stays the right answer, and it is permitted. |
+| 3 | Full set of pkg URL variables? | **Seven**, per `pkg.conf(5)`: `ABI`, `OSNAME`, `RELEASE`, `VERSION_MAJOR`, `VERSION_MINOR`, `OSVERSION`, `ARCH`. The stock config uses `${VERSION_MINOR}` for kmods and base. |
+| 4 | Do `meta.conf`/the catalogue record their source URL? | **YES, and this is the useful finding.** The repository database has a `repodata` key/value table holding `packagesite` → the **already-expanded** upstream URL. No UCL parsing needed for the cross-check; see ADR-006. |
+| 5 | Exact merge/shadow order across repo config locations? | **Documented and moot for us.** `pkg.conf(5)`: files are read in search-path order, later ones override earlier. Irrelevant now that item 4 supplies the URL directly. |
+
+**One correction to this document's own argument.** Under *Against*, I wrote that
+deleting the stock block is "the more natural way to disable something". The
+stock `/etc/pkg/FreeBSD.conf` opens with a comment explicitly telling operators
+the opposite — *"To disable a repository, instead of modifying or removing this
+file, create a `/usr/local/etc/pkg/repos/FreeBSD.conf`"* with `enabled: no`. The
+documented path therefore **preserves** the URL. That weakens my objection: an
+operator following FreeBSD's own instructions leaves discovery something to
+find. It does not change the decision, which rested mainly on the other
+objections and on the small size of the benefit — and item 4 has since made the
+whole discovery-versus-key question moot for the cross-check, which was
+discovery's strongest use.
+
+**A second correction, to HANDOFF §4.5's recorded snippet.** It names the stock
+repository block `FreeBSD:`. The actual name is **`FreeBSD-ports:`**, and there
+are three blocks, two of them enabled.
+
 ## What I did not verify — and how to settle it cheaply
+
+*(Original text, retained. All five are answered above.)*
 
 I have no FreeBSD host; the owner does (HANDOFF §7). None of these blocks the
 ruling, but each would sharpen it, and I am flagging them rather than asserting

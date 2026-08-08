@@ -115,6 +115,12 @@ func (d *Daemon) openRepositoriesLocked() error {
 	}
 	d.repo = repo
 	log.Printf("Repository database: %d packages from %s", repo.Len(), d.config.RepoDBDir)
+
+	// Advisory only (ADR-006): warns, never refuses. See upstreamcheck.go
+	// for why a silent branch mismatch is otherwise undetectable.
+	for _, w := range UpstreamWarnings(d.config.UpstreamURL, repo.Sources()) {
+		log.Printf("Warning: %s", w)
+	}
 	return nil
 }
 

@@ -60,8 +60,13 @@ ADR-001 through -005 are all Approved, and **§5.3 is the next work item and is
 fully unblocked.**
 
 **§4.4 and §4.5 are both closed** (ADR-005 and ADR-006, ruled 2026-08-08).
-**Nothing is blocked on an owner decision.** §5.7 — the facade rework — is
-unblocked for the first time, and is now the largest open item alongside §5.3.
+**No work is blocked.** §5.7 — the facade rework — is unblocked for the first
+time, and is now the largest open item alongside §5.3.
+
+**One new non-blocking question is open for the owner: §4.6**, raised from
+direct measurement of the reference host. jmj has a single `upstream_url` but a
+stock host has two enabled repositories on different URLs, so adopting jmj
+silently drops the others.
 
 Read before starting §5.7: ADR-003 (fetch semantics), ADR-004 (path rule),
 ADR-005 (metadata is proxied) and ADR-006 (`upstream_url`). The key exists,
@@ -287,10 +292,14 @@ runs off FreeBSD. Plaintext `http` is **warned about, not refused** — unlike
 jmj's hash check. The branch/ABI mismatch is **advisory**.
 
 **Implemented** in `internal/config` and `cmd/jmj` — see
-`docs/logs/claude-upstream-url-key.md`. **Two things are deliberately NOT done**
-and are the first things to know: the **advisory cross-check is unimplemented**,
-so nothing currently detects a silent branch mismatch; and **nothing consumes
-`upstream_url` yet**, because the facade is frozen — it is validated, expanded,
+`docs/logs/claude-upstream-url-key.md`. **The advisory cross-check is now
+implemented too** (`internal/daemon/upstreamcheck.go`), against a better source
+than this section originally anticipated: the repository database's `repodata`
+table records the upstream URL already expanded, so no UCL parsing is needed.
+Verified against the reference host.
+
+**One thing is deliberately still NOT done:** nothing consumes `upstream_url`
+yet, because the facade is frozen — it is validated, expanded, cross-checked,
 and then unused until §5.7 lands.
 
 The original statement of the problem follows, retained because it records the
@@ -367,6 +376,16 @@ happy path. The URL already exists on the machine, in `/etc/pkg/FreeBSD.conf`:
 FreeBSD: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/quarterly", ... }
 ```
 
+> **Correction, measured 2026-08-08.** The block is named **`FreeBSD-ports`**,
+> not `FreeBSD`, and the file holds **three** blocks — `FreeBSD-ports` and
+> `FreeBSD-ports-kmods` enabled, `FreeBSD-base` disabled. The kmods and base
+> URLs also carry `${VERSION_MINOR}`. The file's own header comment tells
+> operators to disable a repository with a shadow file setting `enabled: no`
+> rather than by editing or deleting this one, so the documented disable path
+> **preserves** the URL. Superseded in practice: ADR-006 takes the comparison
+> URL from the repository database's `repodata` table instead, already
+> expanded, so none of this needs parsing.
+
 Reading it is consistent with the constraints — it is read-only, and the daemon
 already reads pkg's repository database. Three wrinkles the ruling should
 address:
@@ -393,6 +412,45 @@ proxying from *there*?" with two possible answers instead of one. Also recorded
 there: a fourth wrinkle beyond the three above — deleting the stock block, which
 is the natural way to disable a repository, leaves discovery nothing to find,
 so discovery couples jmj to *how* the operator disables the stock repo.
+
+### 4.6 jmj has one upstream; a stock host has several repositories — **NEEDS AN OWNER RULING**
+
+Raised 2026-08-08 from direct measurement of the reference host, while
+implementing ADR-006's cross-check. Not urgent, and **it does not block §5.7**,
+but it is a real hole in the model rather than a detail.
+
+`upstream_url` is a single URL. A stock FreeBSD 15.1 host has **two enabled
+repositories on different URLs**, plus one disabled:
+
+```
+FreeBSD-ports        pkg+https://pkg.FreeBSD.org/${ABI}/quarterly                enabled
+FreeBSD-ports-kmods  pkg+https://pkg.FreeBSD.org/${ABI}/kmods_quarterly_${VERSION_MINOR}   enabled
+FreeBSD-base         pkg+https://pkg.FreeBSD.org/${ABI}/base_release_${VERSION_MINOR}      disabled
+```
+
+ADR-003 requires jmj to be pkg's **only enabled** repository. So switching a
+host to jmj means the other repositories stop existing for it: a host using
+kernel modules from `FreeBSD-ports-kmods` loses them, silently, because pkg
+simply never learns about that repository again.
+
+Note this is not the facade's problem to solve at request time — the facade
+cannot even tell the repositories apart, since ADR-004's path rule deliberately
+ignores everything before `All/`, so a kmods package and a ports package are
+indistinguishable requests. Whatever the answer is, it is a configuration-shaped
+decision, not a routing one.
+
+**Options, none chosen:** declare multi-repository hosts out of scope and say so
+in the README; allow `upstream_url` to be a list and have the facade try each
+in order; or keep one upstream and accept losing the others. **Do not pick one
+— `AGENTS.md` ground rule 3.**
+
+**What it blocks:** nothing today. **What it costs to leave:** an operator on a
+stock 15.1 host loses the kmods repository with no warning at the moment they
+adopt jmj. **What unblocks it:** one ADR, or an explicit scope ruling.
+
+The ADR-006 cross-check partially mitigates it: pointing `upstream_url` at a
+repository pkg does not use produces a warning naming every repository it does
+use, so the kmods URL is at least visible to the operator at that moment.
 
 ## 5. Work, in order
 
