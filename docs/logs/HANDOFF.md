@@ -38,8 +38,9 @@ leftovers, and the unreachable size-mismatch branch — **have been executed**.
 log recording what was decided and why; everything below has been edited to
 match, so §4.3 and §5.5 no longer read as open. Nothing in it is outstanding.
 
-The one thing that ruling round raised and did **not** settle is the §4.2
-per-remote-IP cap, which still blocks §5.3. See the end of §4.2.
+The one thing that ruling round raised and did not settle — the §4.2
+per-remote-IP cap — **has since been ruled on** and is written up as
+`docs/adr/adr-002-serving-side-concurrency.md`. §5.3 is no longer blocked on it.
 
 ## 1. Document map — what to trust
 
@@ -163,7 +164,8 @@ aimed at the peer server's HTTP surface end to end.
 
 ## 4. Blocked — needs an owner decision before you write code
 
-§4.1 is retained but no longer blocked; §4.2 and §4.3 are the live ones.
+**Nothing in §4 is blocked any more.** All three are retained for their
+reasoning and evidence, which the implementing work still needs.
 
 ### 4.1 Cache and path layout — **RATIFIED AND IMPLEMENTED**
 
@@ -219,7 +221,12 @@ or strictly to what pkg 2.7.5 demonstrably does — was answered by ratifying th
 rules as proposed: they follow what was measured. Widening them later is cheap;
 just do not do it on speculation.
 
-### 4.2 Serving-side concurrency — **DECIDED: adopt a limit. Implement with §5.3.**
+### 4.2 Serving-side concurrency — **DECIDED AND WRITTEN UP AS ADR-002. Implement with §5.3.**
+
+`docs/adr/adr-002-serving-side-concurrency.md` is now the authority for this;
+it is what gives §5.3 the ground-rule-1 mandate the peer spec's silence
+withheld. What follows is the reasoning that produced it, kept because the
+argument is the evidence.
 
 The owner states hostile peers are expected. That settles it, and it reverses
 the recommendation I first gave, so the reasoning is worth keeping.
@@ -250,10 +257,14 @@ the mechanism, not a specific number nobody has measured.
 Implement **with §5.3, not before**: there is no `503` on the `peerwire`
 framing, which that work deletes.
 
-**Still open — needs a ruling.** A *global* limit still lets one hostile IP hold
-every slot, because nothing reclaims them. A **per-remote-IP cap** is what
-actually defends against that, and it is in no spec, so it was not built. Raised
-with the owner; unanswered.
+**Ruled: adopt the per-remote-IP cap too.** A *global* limit still lets one
+hostile IP hold every slot, because nothing reclaims them. The cap is the second
+semaphore in the same handler, keyed on the host half of `r.RemoteAddr` — never
+a header — and it also defaults to `0` = unlimited. The NAT objection is real but
+bounded: a `503` spills the requester to the next of its `MAX_PEERS = 3` holders
+and then to pkg's own mirror fallback, so a capped-out legitimate requester gets
+a slower install, not a broken one. Rationale, rejected alternatives and the
+distributed-attacker limitation are in ADR-002.
 
 Note before tuning anything: concurrency is not today's binding constraint. The
 current seeder is byte-slice based and copies the payload twice, so one request
@@ -373,7 +384,8 @@ not just a migration.
 
 Two things it must carry that are easy to lose:
 
-- The §4.2 `503` semaphore.
+- The §4.2 `503` semaphores — **both** of them, global and per-remote-IP, per
+  ADR-002. Also the `503` row that document says the peer spec still needs.
 - The size bound from §5.5, as real code: `io.LimitReader(body,
   expectedSize+1)` plus the `Content-Length` check. Neither can exist while the
   fetch path returns a `[]byte`.
