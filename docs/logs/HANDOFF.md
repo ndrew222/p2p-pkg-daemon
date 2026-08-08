@@ -271,8 +271,23 @@ implements either reading by accident.
 ### 4.5 Which upstream mirror, and what the config key is called
 
 ADR-003 requires a configured upstream and deliberately leaves the key name, the
-TLS decision and the choice of mirror open. **Blocks §5.7.** Do not invent a key
-name — `AGENTS.md` ground rule 3.
+TLS decision and the choice of mirror open. **Blocks §5.7, and is now the only
+thing that does.** Do not invent a key name — `AGENTS.md` ground rule 3.
+
+**Tradeoff analysis: `docs/logs/claude-upstream-mirror-config.md`** (written
+2026-08-08 at the owner's request; recommends without deciding). It compares an
+explicit key, discovery from pkg's config, and the hybrid below, and recommends
+an explicit required key plus a *best-effort advisory* cross-check against pkg's
+config — so that the fragile parsing only ever powers a warning.
+
+**ADR-005 widened what this setting is.** The facade now proxies the catalogue,
+so the upstream URL no longer names a fallback source: it names **the repository
+pkg actually gets**. pkg's config points the jmj repo at loopback and says
+nothing about which real repository that is. A wrong upstream therefore does not
+error — pkg fetches the catalogue through jmj from the wrong branch, populates
+its database from it, and every hash matches, because the system is
+self-consistent and both branches carry the same signature. Whatever is ruled
+should say what detects that, if anything.
 
 **Correction: SRV is not a problem, and an earlier draft of this section said it
 was.** The claim was that the daemon must resolve SRV itself or be pointed at a
@@ -321,6 +336,15 @@ address:
 A reasonable shape, if the owner wants one: an optional explicit key that
 overrides, defaulting to discovery, and a hard startup failure when neither
 yields a URL. **Not decided — recorded as a candidate, not a design.**
+
+**The analysis argues against exactly that shape** (`claude-upstream-mirror-config.md`,
+option C): it pays the whole cost of discovery — a UCL parser, pkg's multi-file
+shadowing semantics, `${ABI}` expansion, none of it testable in the gate — to
+make optional a path an explicit key already covers, and it leaves "why is jmj
+proxying from *there*?" with two possible answers instead of one. Also recorded
+there: a fourth wrinkle beyond the three above — deleting the stock block, which
+is the natural way to disable a repository, leaves discovery nothing to find,
+so discovery couples jmj to *how* the operator disables the stock repo.
 
 ## 5. Work, in order
 
