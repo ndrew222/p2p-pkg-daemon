@@ -1,6 +1,6 @@
 # ADR-002: Serving-side concurrency — a global limit and a per-remote-IP cap
 
-**Status:** Proposed (drafted 2026-08-08 as an owner ruling by Andrew; awaiting vetting by Elroy)
+**Status:** Approved by Andrew (drafted 2026-08-08 as an owner ruling by Andrew)
 
 Supersedes the open item at the end of `docs/logs/HANDOFF.md` §4.2, which recorded the global limit as decided and the per-remote-IP cap as raised-but-unanswered.
 
