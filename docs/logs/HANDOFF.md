@@ -56,6 +56,19 @@ per-remote-IP cap — **has since been ruled on** and is written up as
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
 | `docs/use-case-descriptions.md` | Current for UC-01, UC-02, UC-05, UC-06, UC-07. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
+| `docs/adr/adr-001-transport-nat.md` | Current for what it decides: no NAT traversal, plain HTTP over TCP to the advertised IP:port. **But see the caveat below — its status line still says "Proposed".** |
+
+**`docs/adr/` was missing from this map until now, and the omission hid a
+contradiction.** `AGENTS.md` ground rule 1 makes an ADR one of the three things
+a change may map to, and its hard-constraints list cites ADR-001 as settled
+("no NAT traversal (ADR-001)") — yet ADR-001's own status reads *"Proposed
+(drafted 2026-07-07; awaiting vetting by Andrew and Elroy)"*, and `docs/adr/`
+appears nowhere in AGENTS.md's numbered precedence list. So an un-vetted
+document is already being enforced as a hard constraint, and nothing says
+whether an ADR outranks a use case or the reverse. **Two things for the owner:
+vet ADR-001 (or mark it Accepted if that vetting already happened off-ticket),
+and say where ADRs sit in precedence.** Listed here as existing; no precedence
+rank has been invented for it.
 
 ### Stale — do not act on these without reading §3.1 first
 
@@ -64,9 +77,11 @@ per-remote-IP cap — **has since been ruled on** and is written up as
 | `docs/logs/elroy-uc1-config.md` §"Decision 3" | **Actively misleading**, and now doubly so. It justifies `buffer_dir` as needing to "persist across reboots". That is wrong: the daemon has no store of its own and serves straight from the pkg cache, and the buffer is per-request and ephemeral. The field it describes no longer exists either — its settings table still lists `listen_addr` and `buffer_dir`. Left unedited because it is another author's work log; read it as history only. |
 | `docs/protocol-spec-v0.1.md` | Historical. Still authoritative for tracker **semantics** (message meanings, state, life cycle); its wire-encoding section is superseded by v0.2. |
 
-Minor: `AGENTS.md` points at `docs/diagrams/uc-*.puml`. No such directory —
-the diagrams are at `docs/uc-*.puml`. Fix it if you are touching `AGENTS.md`
-anyway; it is not worth a commit of its own.
+~~Minor: `AGENTS.md` points at `docs/diagrams/uc-*.puml`. No such directory —
+the diagrams are at `docs/uc-*.puml`.~~ **Fixed**; precedence entry 6 now names
+the real path. Note that `AGENTS.md`'s layout section still describes the tree
+as it was planned, not as it is: `docs/adr/` exists and is not listed there
+either.
 
 ## 2. State of the tree
 
@@ -101,11 +116,18 @@ migration table describes, it has to write the cache-backed seeder that has
 never existed. Budget for that. The facade half of §5.4 is done; the peer half
 needs both.
 
-**The daemon should now do something useful against a real FreeBSD host, and
-nobody has checked.** The facade is mounted, the catalogue is read, and the
-watcher size-checks against it. What has never been exercised is pkg itself —
-see §7.1, which is now testable for the first time and is the single most
-valuable thing left.
+~~**The daemon should now do something useful against a real FreeBSD host, and
+nobody has checked.**~~ **Checked, 2026-08-08 — see §7.** The facade model works
+against real pkg: a stand-in that proxied the signed catalogue was accepted as a
+genuine repository (37,789 packages, `signature_type: fingerprints` intact) and a
+real `pkg install` through it succeeded end to end.
+
+**But §7.1 came back false**, and it is the assumption the failure paths rest
+on: pkg does not fall through from a `404` to another *repository*, only between
+*mirrors of one repository*, and no mirror mechanism can currently name a
+loopback daemon. Read §7 before planning any facade or UC-02 work — the
+status-code design may have to change, and that is an owner ruling, not a
+refactor.
 
 ## 3. Decided by the owner — implement, do not re-litigate
 
@@ -446,11 +468,16 @@ to completion, so a size verdict is a second route to the same conclusion. Only
 longer holds the file, not that it lied. UC-02 steps 9/9c/11c, its assumptions
 cell, `uc-02.puml` and the peer spec's size-bound section now state one rule.
 
-### 5.6 The other §4.1 half nobody has checked
-The facade and the watcher now agree on `~hash10`, but §7.5 below — whether the
-cache after a real `pkg install` matches the `All/Hashed/` layout seen from a
-`pkg fetch -o` probe — is still unverified. The rules are consistent with both
-observations; nothing proves the observations are consistent with each other.
+### 5.6 The other §4.1 half nobody has checked — **CLOSED**
+~~The facade and the watcher now agree on `~hash10`, but §7.5 below — whether
+the cache after a real `pkg install` matches the `All/Hashed/` layout seen from
+a `pkg fetch -o` probe — is still unverified.~~
+
+**Verified 2026-08-08.** A real `pkg install` requests the same
+`All/Hashed/<name>-<version>~<hash10>.pkg` shape the `pkg fetch -o` probe did,
+and the cache it writes stays flat — no `All/` or `Hashed/` directories, and the
+`~hash10` symlink pattern of §4.1(b). The observations are consistent with each
+other, not merely each consistent with the rules. See §7.5 and the work log.
 
 ## 6. Known defects
 
@@ -476,26 +503,116 @@ observations; nothing proves the observations are consistent with each other.
 Everything here needs the FreeBSD host. The owner has granted SSH access
 (`root@45.76.163.52`).
 
+**Recon is done; the experiment is not.** Read-only commands only — nothing was
+written to the host. Work log: `docs/logs/claude-pkg-mirror-verification.md`,
+which carries the probe-server script and the repo configs ready to run. **One
+run of that harness answers items 1–5**: it proxies signed metadata from a real
+mirror so pkg treats it as a genuine repository, intercepts only `All/*.pkg`,
+and logs every request with headers — so items 3 (`HEAD`/`Range`) and 5 (cache
+layout) fall out of the log and the post-install cache at no extra cost. What
+is now measured:
+
+| Fact | Value |
+|---|---|
+| OS / pkg | `FreeBSD 15.1-RELEASE-p1 amd64`, pkg **2.7.5** — the same pkg behind every §4.1 measurement |
+| ABI | `FreeBSD:15:amd64`, osversion `1501000` |
+| `/usr/local/etc/pkg/repos/` | **does not exist** |
+| Tools | `python3` 3.12.13, `sqlite3`, `fetch`, `nc`. **No `curl`** — write recipes with `fetch -qo -`. |
+| `/var/cache/pkg` | 32 entries, 20G free |
+
+**The experiment has been RUN (2026-08-08) and §7.1–§7.5 are all answered.**
+The host was returned to baseline, verified. Full detail and controls in the
+work log; the summary is below, and **§7.1's answer changes the architecture.**
+
+> **pkg falls through on a non-200 between *mirrors of one repository*, never
+> between *repositories*.** `man pkg-repository` on HTTP mirror lists: "Mirrors
+> are tried in the order listed **until a download succeeds**." On multiple
+> repositories it says only that pkg will **search** them in `PRIORITY` order —
+> solve-time selection, not fetch-time retry.
+>
+> jmj is designed as a repository that answers `404` and expects pkg to go
+> elsewhere. **It will not.** Measured with `jmjprobe` at priority 100 and stock
+> `FreeBSD-ports` at priority 0, both catalogues at 37,789 rows, the target
+> package confirmed present in the other repository: `404`, `503` and
+> connection-refused all fail the install with exit 1 and no retry. The
+> connection-refused case was run with **the probe process killed**, so no code
+> of ours was in the fetch path — the finding is about pkg's model, not the
+> harness.
+
+**Consequence, which needs an owner ruling and is NOT decided:** the facade may
+have to fall back to the real mirror *server-side* — becoming a
+proxy-with-fallback rather than a mirror-that-declines. The harness worked
+precisely because it proxied upstream instead of 404ing. That touches every
+UC-02 failure path, all of UC-07, and the facade spec's status-code table. See
+"What this costs the design" in the work log. Note the `404` design is *correct*
+under mirror-list semantics — it is only wrong under repository semantics, so
+"is the pkg segfault below fixable?" is a real input to the decision.
+
 1. **Does pkg actually fall through to the next mirror on a non-200?** This is
    *the* load-bearing assumption of the entire design — every failure path in
    UC-02 and all of UC-07 depend on it — and it has **never been verified**.
    UC-07's assumptions say the integration smoke test must confirm it. If it is
    false, the architecture changes. Do this before building more on top of it.
+
+   **ANSWERED — and the answer is the bad one.** Between mirrors, yes;
+   between repositories, no. jmj depends on the latter. See the block above;
+   full controls in the work log. The ambiguity this item contained turned out
+   to *be* the answer, which is why it was worth stopping on rather than
+   picking a reading.
 2. **How is mirror ordering configured?** Getting the daemon *first* and a real
    mirror second. UC-07 says the same smoke test settles it. We have no
    confirmed `pkg.conf` / `repos/*.conf` recipe, and without one the daemon
    cannot be exercised in situ at all.
-3. **Does pkg issue `HEAD` or `Range` against mirrors?** Facade open questions 1
-   and 5. The size objection to answering `HEAD` is gone (§5.2 gives an exact
-   size without fetching), so this is now purely a question about pkg's
-   behaviour.
-4. **What does pkg do with a `200` whose body fails its own checksum?** Retry
-   the next mirror, or abort the whole operation? Determines whether a facade
-   bug is a degraded experience or a broken one.
-5. **Cache layout after a real `pkg install`.** §4.1(b) was observed in
-   `/var/cache/pkg`; the `All/Hashed/` path in §4.1(a) came from a
-   `pkg fetch -o` probe. Confirm the two are consistent and that nothing writes
-   `All/Hashed/` into the cache itself.
+
+   **Sharpened by recon.** There is no recipe to discover — `/usr/local/etc/pkg/repos/`
+   does not exist on the host, so this has to be *derived*, and whatever is
+   derived is the first such config the project has ever had. The stock repo is
+   `mirror_type: "srv"` over `pkg+https://`, with `_https._tcp.pkg.freebsd.org`
+   resolving to a single SRV record. Three candidate mechanisms, with very
+   different consequences for jmj:
+
+   **ANSWERED: none of the three currently delivers it.**
+
+   1. **`mirror_type: "srv"`** — real, but ordering comes from DNS SRV records,
+      so naming a loopback daemon needs a zone you control. Not reachable from
+      `repos/*.conf` alone. Untested, for want of a zone to edit.
+   2. **`mirror_type: "http"`** — the documented mechanism and the one that fits
+      jmj exactly. **It segfaults pkg 2.7.5.** `pkg update` dies with
+      `Segmentation fault (core dumped)`, or with `Sandboxed process …
+      terminated abnormally by signal: 11` + `pkg: No signature found` — the
+      crash is in the sandboxed signature-verification child. **Not our bug:**
+      the list was `URL: ` + whitespace + one URL, exactly as
+      `man pkg-repository` specifies, and it reproduces with a list naming only
+      the real upstream mirror, with our probe serving nothing but that one text
+      document.
+   3. **Two repositories with `priority`.** Configures cleanly; gives selection
+      without fall-through. Useless for this purpose (item 1).
+
+   So there is a working recipe for *being* the mirror (single repo,
+   `mirror_type: none`, proxying the signed catalogue — this is what the harness
+   did, and a real `pkg install` through it succeeded end to end). There is no
+   working recipe for *being first among several*.
+3. **Does pkg issue `HEAD` or `Range` against mirrors?** ~~Facade open questions
+   1 and 5.~~ **ANSWERED: neither.** Every logged request — catalogue refresh,
+   `pkg fetch`, real `pkg install` — was a plain `GET`. Zero `Range`, zero
+   `HEAD`. User-agents `pkg/2.7.5` and `fetch libfetch/2.0`. **Scope:** all
+   observed transfers were small and none was interrupted; resume-after-
+   interrupt was not tested and `Range` could plausibly appear there. Facade
+   open questions 1 and 5 are answered for the normal path only.
+4. **What does pkg do with a `200` whose body fails its own checksum?**
+   **ANSWERED: it detects it and then has nowhere to go.** A `200` with correct
+   `Content-Length` and garbage bytes gives `pkg: <pkg> failed checksum from
+   repository`, exit 1, nothing landed, and — as in item 1 — **no attempt
+   against the other repository**. So a facade that serves wrong bytes is a
+   broken install, not a degraded one.
+5. **Cache layout after a real `pkg install`.** **ANSWERED: consistent, and the
+   cache stays flat.** A real install requested
+   `All/Hashed/<name>-<version>~<hash10>.pkg` — the same shape §4.1(a) measured
+   from a `pkg fetch -o` probe, so the two observations agree, which is exactly
+   what §5.6 said nothing had established. `find /var/cache/pkg -type d` returns
+   only `/var/cache/pkg`: nothing writes `All/` or `Hashed/` into the cache. The
+   resulting entry is the §4.1(b) symlink pattern
+   (`…_1.pkg -> …_1~49f94c8aa7.pkg`, 757 B target). **§5.6 is closed too.**
 6. **Is `cksum` ever not sha256-hex?** ~~One repository, one ABI.~~ **Largely
    settled:** checked across **both** repositories on the host — 38,074 rows,
    **zero** that are not 64 lowercase hex. The schema also declares

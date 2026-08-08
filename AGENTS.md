@@ -8,6 +8,7 @@ read the README and `docs/` instead; this file assumes you are an agent.
 1. **Spec first, always.** The documents in `docs/` are the contract. Every change must map to a use-case step, the tracker protocol spec, or an ADR. If no spec covers what you are about to write, STOP — do not write the code.
 2. **Ambiguities are live wires.** If a spec is unclear, contradictory, or silent on something your task needs, STOP AND WAIT. Report the ambiguity to the user you are working with, so they can escalate it to the spec owner. Do not pick a "reasonable" interpretation and continue. Do not code around it.
 3. **Deliberately unspecified means ask, not invent.** The specs mark some items as open decisions (see the table at the bottom of `docs/tracker-protocol-spec-v0.1.md`). These are not gaps for you to fill.
+4. **End by saying what is waiting on the owner.** When you conclude a session, state plainly what is contingent on an owner decision and what is blocked by one: every ambiguity you raised under rules 2 and 3, every ruling you deferred, and anything you delivered that assumes an answer you did not get. For each, say what unblocks it and what it costs to leave it blocked. Rules 2 and 3 only work if what they surface is still visible at the end — an item raised in the middle of a long session and not repeated when you finish has effectively been dropped, and the owner should not have to reread the session to find out what needs them. A session that produced no such items should say that too, rather than leaving it ambiguous.
 
 ## Authoritative documents, in precedence order
 
@@ -16,7 +17,7 @@ read the README and `docs/` instead; this file assumes you are an agent.
 3. `docs/peer-transfer-spec-v0.2.md` — the daemon↔daemon wire for package bytes (UC-02 fetch loop, UC-06 serving side): HTTP over TCP, `GET /pkg/<name-version>`, status codes, the size and hash bound, buffering and timeouts.
 4. `docs/mirror-facade-spec-v0.1.md` — the pkg↔daemon wire (UC-02, UC-07): the `All/<name-version>.pkg` path rule and facade status codes.
 5. `docs/use-case-descriptions.md` — UC-01 … UC-07 behaviour spec.
-6. `docs/diagrams/uc-*.puml` — authoritative where the prose is ambiguous.
+6. `docs/uc-*.puml` — authoritative where the prose is ambiguous.
 7. `README.md` — orientation only.
 
 These are **three separate wires** and they do not share a path grammar. The peer wire's `/pkg/<name-version>` namespace is deliberately unlike the facade's `…/All/<name-version>.pkg` so that a seeding daemon cannot be mistaken for, or used as, a pkg mirror. Do not "unify" them.
