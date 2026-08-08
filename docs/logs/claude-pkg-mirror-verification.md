@@ -2,10 +2,16 @@
 
 Author: claude. Feature: HANDOFF §7.1–§7.5 empirical verification.
 
-**Status: harness designed and recon complete; the experiment itself is NOT
-run.** It needs permission to start a process on the owner's host and to write
-a pkg repository config there. See "Uncertainties" — this is raised, not
-resolved.
+**Status: RUN. §7.1–§7.5 are all answered.** The owner granted permission and
+the experiment was executed against `root@45.76.163.52` on 2026-08-08. The host
+was returned to baseline afterwards (teardown verified — see the end).
+
+**The headline is bad news: §7.1's load-bearing assumption is false as the
+design relies on it.** pkg does fall through on a non-200, but only between
+*mirrors of one repository*, never between *repositories*. jmj is currently
+designed as a repository that 404s and expects pkg to go elsewhere. It will
+not. See "Results" and then "What this costs the design", which needs an owner
+ruling and is not resolved here.
 
 ## Why this and not §5.3
 
@@ -112,6 +118,205 @@ exist today, so teardown is `rm -rf` of a directory we created. The stock
 software — that one is not reversible by deleting a file, and is why the whole
 thing is gated on asking.
 
+## Aborted first run — what it did and did not establish
+
+A first run was made against the host and stopped part-way. Its request log
+(`/root/jmjprobe/requests.jsonl`, 9 entries) is worth keeping, because two
+things in it are real and one apparent finding is not.
+
+**Real: `mirror_type: "http"` works — mechanism (2) is viable.** pkg 2.7.5
+fetched `/mirrorlist`, parsed it, and then fetched `/meta.conf`, `/data.pkg`
+and `/packagesite.pkg` from the *first* URL in the list. So the daemon *can* be
+placed ahead of a real mirror inside one repository, which is the ordering
+§7.2 asks for. Whether it *falls back* to the second URL on a non-200 is still
+untested — the run never reached a package file.
+
+**Real: pkg issues conditional GETs.** `/packagesite.pkg` was requested with
+`If-Modified-Since: Thu, 06 Aug 2026 18:39:36 GMT`. This is new: §7.3 asks
+about `HEAD` and `Range`, and neither appeared, but nobody thought to ask about
+`If-Modified-Since`. **The facade has no answer for it today** — it does not
+track upstream modification times, and a facade that ignores the header and
+always replies `200` merely wastes bandwidth, while one that replies `304`
+wrongly would serve pkg a stale catalogue. Worth a spec question of its own.
+
+**Not real: the pkg segfault.** The run ended with pkg dumping core
+(`/root/pkg.core`, 13 MB) during "Processing entries", and that looked like a
+pkg defect. It is almost certainly **a bug in this probe**, now fixed. urllib
+raises a 304 as an `HTTPError`, so the 304 above fell into the generic error
+branch, which replied `304` *with* a body and a `Content-Length`. A 304 must
+not carry a body; sending one desynchronises the connection and the client
+reads the body as the head of the next response. Feeding that to a catalogue
+parser is a fully sufficient explanation for the crash, and it is our fault,
+not pkg's. **Do not record a pkg segfault as a finding on this evidence.**
+Re-run with the fix before claiming anything about pkg's robustness.
+
+**Design flaw in that run's config.** It disabled both stock repositories:
+
+```
+FreeBSD-ports: { enabled: no }
+FreeBSD-ports-kmods: { enabled: no }
+jmjprobe: { url: "http://127.0.0.1:8081/mirrorlist", mirror_type: "http", ... }
+```
+
+With every real repository disabled there is no second repository to fall back
+*to*, so this configuration cannot test mechanism (3) even in principle — and
+mechanism (2) versus (3) is the whole point. It also leaves the host with no
+working package manager if the probe is stopped, which is the foot-gun above
+arriving in practice. Test mechanism (3) with the stock repos left enabled and
+a `jmjprobe` block at higher `priority`.
+
+## Results
+
+All measured on pkg 2.7.5 / FreeBSD 15.1-RELEASE-p1, ABI `FreeBSD:15:amd64`.
+
+### The harness is sound (stated first, because everything below depends on it)
+
+The probe proxied the signed catalogue from `pkgmir.geo.freebsd.org` and pkg
+accepted it as a genuine repository: `pkg update -f` processed **37,789
+packages** with `signature_type: fingerprints` intact. A real `pkg install`
+through it succeeded end to end (exit 0), including resolving and fetching a
+dependency. **This is the first time jmj's facade model has been exercised
+against real pkg, and the metadata half of it works.**
+
+The control that matters for every claim below: with the *identical* repo
+config, `mode=proxy` succeeds and the file lands. Only the probe's response
+differs between the passing and failing runs.
+
+### §7.1 — Does pkg fall through to the next mirror on a non-200?
+
+**Yes between mirrors, no between repositories.** The distinction the recon
+flagged is the whole answer.
+
+`man pkg-repository`, §REPOSITORY MIRRORING, on HTTP mirror lists:
+
+> Mirrors are tried in the order listed **until a download succeeds**.
+
+That is exactly the semantic jmj needs — and it is scoped to *mirrors*. On
+multiple repositories the same page says only that pkg will **search** them in
+`PRIORITY` order. Search is solve-time selection, not fetch-time retry.
+
+Measured, with `jmjprobe` at priority 100 and stock `FreeBSD-ports` at priority
+0, both enabled, both catalogues at 37,789 rows, and `pkg rquery -r
+FreeBSD-ports` confirming the target package present in the *other* repository:
+
+| Probe response | Exit | Outcome |
+|---|---|---|
+| `404 Not Found` | 1 | `pkg: …: Not Found`. Nothing fetched. No retry against `FreeBSD-ports`. |
+| `503 Service Unavailable` | 1 | `pkg: …: Service Unavailable`. Same. |
+| Connection refused (probe **not running**) | 1 | `pkg: …: Connection refused`. Same. |
+
+**The third row is the load-bearing control**: the probe process was killed
+entirely, so no code of mine was in the fetch path, and pkg still did not fall
+back to a healthy repository that demonstrably held the package. The finding is
+about pkg's model, not about this harness.
+
+(That control needs `pkg fetch -U`. Without it pkg tries to refresh the dead
+repository's catalogue first and aborts with exit 3 before reaching the fetch —
+a separate and also useful finding: **an unreachable facade breaks `pkg update`
+outright**, it does not degrade.)
+
+### §7.2 — How is mirror ordering configured?
+
+Of the three candidate mechanisms, **none currently delivers daemon-first,
+real-mirror-second**:
+
+1. **`mirror_type: srv`** — works, but ordering comes from DNS SRV records.
+   Expressing a loopback daemon needs real DNS; not reachable from
+   `repos/*.conf` alone. Untested for want of a zone to edit.
+2. **`mirror_type: http`** — the documented mechanism, and the one that would
+   fit jmj exactly. **It segfaults pkg 2.7.5.** `pkg update` dies with
+   `Segmentation fault (core dumped)`, or with `Sandboxed process … terminated
+   abnormally by signal: 11` followed by `pkg: No signature found`, i.e. the
+   crash is in the sandboxed signature-verification child.
+3. **Two repositories with `priority`** — configures cleanly, and gives
+   selection without fall-through (§7.1 above). Useless for this purpose.
+
+On (2), the crash is **not** malformed input from this harness. The list was
+`URL: ` + whitespace + one URL per line, which is precisely what
+`man pkg-repository` specifies. And it reproduces with a list naming **only**
+the real upstream mirror — the probe then serves one short text document and
+nothing else, and pkg still segfaults. Whether this is a known FreeBSD bug was
+not investigated; it is reproducible in three lines of config and worth a PR to
+FreeBSD if anyone wants to file one.
+
+### §7.3 — Does pkg issue `HEAD` or `Range`?
+
+**No, neither.** Every request the probe logged — catalogue refresh, `pkg
+fetch`, and a real `pkg install` — was a plain `GET`. Zero `Range` headers,
+zero `HEAD`. User-agents `pkg/2.7.5` and `fetch libfetch/2.0`.
+
+Scope this honestly: all observed transfers were small and none was
+interrupted. Resume-after-interrupt was not tested, and `Range` could
+plausibly appear there. Facade open questions 1 and 5 are answered for the
+normal path only.
+
+### §7.4 — What does pkg do with a 200 whose body fails its checksum?
+
+Probe returned `200` with a correct `Content-Length` and garbage bytes:
+
+```
+pkg: cups-smb-backend-1.0_12 failed checksum from repository
+```
+
+Exit 1, nothing landed, **and no attempt against the other repository** — the
+same no-fall-through result as §7.1. So a facade that serves wrong bytes is a
+broken install, not a degraded one. pkg does detect it; it just has nowhere to
+go afterwards.
+
+### §7.5 — Cache layout after a real `pkg install`
+
+**Consistent with §4.1, and the cache stays flat.** During a real install pkg
+requested:
+
+```
+GET /All/Hashed/papersize-default-a4-0.0.20120302_1~49f94c8aa7.pkg
+GET /All/Hashed/libpaper-1.1.28_1~599a5a67ab.pkg
+```
+
+— the same `All/Hashed/…~hash10` shape §4.1(a) measured from a `pkg fetch -o`
+probe. The two observations agree, which is what §5.6 said nothing had yet
+established.
+
+`find /var/cache/pkg -type d` returns only `/var/cache/pkg` itself: **nothing
+writes `All/` or `Hashed/` into the cache.** The resulting entry is the §4.1(b)
+symlink pattern exactly —
+
+```
+papersize-default-a4-0.0.20120302_1.pkg -> papersize-default-a4-0.0.20120302_1~49f94c8aa7.pkg   (757 B target)
+```
+
+§5.6 and §7.5 are both closed.
+
+## What this costs the design — needs an owner ruling
+
+The mirror facade is specified to answer `404` when it cannot serve a package,
+on the assumption that pkg then tries a real mirror. **That assumption is
+false.** A `404` from jmj is the end of the install, not a fall-through.
+
+The shape of the fix is visible in the harness: the probe worked precisely
+*because* it proxied upstream itself rather than 404ing. That suggests the
+facade must fall back to the real mirror **server-side** — becoming a
+proxy-with-fallback rather than a mirror-that-declines.
+
+That is an architecture change touching UC-02's every failure path, all of
+UC-07, and the facade spec's status-code table, so **per ground rule 2 it is
+reported and not decided here.** Three things the owner needs to weigh, none of
+which I have resolved:
+
+1. Does the facade proxy upstream on a peer miss, and if so does that make the
+   daemon a mandatory single point of failure for all pkg traffic?
+2. If it proxies, the "daemon writes only to its own temp buffer" constraint
+   and the `pkgsize`/`cksum` verification story both need revisiting for bytes
+   that never came from a peer at all.
+3. Or: keep the 404, and accept that a peer miss fails the install — which is a
+   very different product.
+
+Note that the `404` behaviour is *correct and desirable* under mirror-list
+semantics; it is only wrong under repository semantics. If `mirror_type: http`
+were not crashing, the original design would work as written. That makes "is
+the pkg segfault fixable / fixed upstream?" a genuine input to the decision
+rather than a curiosity.
+
 ## Difficulties
 
 **Making pkg accept a fake mirror at all.** A repository with
@@ -129,20 +334,27 @@ written for a future agent has to say `fetch -qo -`.
 
 Per AGENTS.md ground rule 2, these were raised rather than resolved:
 
-1. **Permission to run the experiment.** Standing up a listener on the owner's
-   host, writing a pkg repo config, and doing one real `pkg install` are changes
-   to a live machine. The handoff grants SSH access for §7 work, but that is not
-   the same as standing authorisation to reconfigure the package manager.
-   **Raised with the owner; unanswered. This is what blocks the log from having
-   results in it.**
+1. ~~**Permission to run the experiment.**~~ **Resolved** — raised with the
+   owner, who granted it explicitly ("It is indeed a disposable box"). Worth
+   recording that the permission had to be granted as a settings rule by the
+   owner personally: an agent cannot grant itself the capability, and should
+   not try to route around the refusal when it is blocked from doing so.
 
-2. **Which fallback mechanism §7.1 is actually asking about** — mirror-level or
-   repository-level (finding (b) above). The handoff and UC-07 both say "next
-   mirror" without distinguishing. I did not pick one; the experiment is
-   designed to test all three rather than to assume the answer. **Raised here,
-   unanswered.**
+2. ~~**Which fallback mechanism §7.1 is actually asking about**~~ — **Resolved,
+   and it was the right thing to have stopped on.** The answer is that pkg has
+   both, they behave differently, and jmj depends on the one it does not get.
+   Had I assumed either reading, the experiment would have produced a confident
+   wrong answer: assuming mirror-level would have "confirmed" fall-through from
+   the man page without noticing jmj cannot use it, and assuming
+   repository-level would have reported a flat "pkg does not fall through" and
+   missed that the behaviour is real, documented and merely out of reach.
 
-3. **Where ADRs sit in the precedence order.** AGENTS.md ground rule 1 says
+3. **Whether the facade proxies upstream or keeps its `404`.** This is the
+   architecture consequence in "What this costs the design". It is a spec-level
+   change and I have not picked a side. **Raised; needs an owner ruling before
+   §5.3 or any further facade work.**
+
+4. **Where ADRs sit in the precedence order.** AGENTS.md ground rule 1 says
    every change must map to "a use-case step, the tracker protocol spec, or an
    ADR", and its hard-constraints list cites ADR-001 as settled ("no NAT
    traversal (ADR-001)"). But `docs/adr/` appears nowhere in AGENTS.md's
@@ -275,6 +487,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               extra={"Last-Modified": r.headers.get("Last-Modified")})
         except urllib.error.HTTPError as e:
             log({"proxied": url, "upstream_status": e.code})
+            if e.code == 304:
+                # A 304 MUST NOT carry a body (RFC 9110 §15.4.5). Replying with
+                # one desynchronises the connection: the client reads the body
+                # as the head of the next response. urllib raises 304 as an
+                # HTTPError, so without this branch it fell into the generic
+                # error path below and did exactly that.
+                self.send_response(304)
+                self.end_headers()
+                return
             self._respond(e.code, b"upstream error\n", "text/plain", method)
         except Exception as e:  # noqa: BLE001
             log({"proxied": url, "error": str(e)})
@@ -354,4 +575,17 @@ jmjprobe: {
 ```
 
 Teardown: `rm -rf /usr/local/etc/pkg/repos /root/jmjprobe /root/probe.py`,
+plus `rm -rf /var/db/pkg/repos/jmjprobe`, `pkg delete -y` the test packages,
 then `pkg update -f` to restore the stock catalogue.
+
+**Teardown was run and verified.** Afterwards: `/usr/local/etc/pkg/repos` does
+not exist (its absence is the baseline marker §7 recon relied on),
+`/var/db/pkg/repos/` holds only `FreeBSD-ports` and `FreeBSD-ports-kmods`,
+`pkg -vv` lists only the three stock repositories, and the restored kmods
+catalogue reports **239 packages** — matching the figure §5.2 recorded from the
+untouched host, which is a decent check that the box is back where it started.
+The two test packages (`papersize-default-a4`, `libpaper`) were deinstalled.
+
+The pkg cache was deliberately **not** cleaned: it is read-only input to jmj,
+the two new entries are ordinary cached packages, and wiping it would have
+destroyed the artefacts §4.1(b) measured.
