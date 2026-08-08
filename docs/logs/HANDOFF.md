@@ -83,6 +83,7 @@ without deciding.
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
+| `docs/uc-07.puml` | Current, **not implemented**. New — UC-07 had no diagram before ADR-005. Carries the relay flow, the 304 branch and the terminal `502`. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
 | `docs/uc-06.puml` | Current as of the HTTP peer wire. |
 
@@ -279,6 +280,24 @@ thing that does.** Do not invent a key name — `AGENTS.md` ground rule 3.
 explicit key, discovery from pkg's config, and the hybrid below, and recommends
 an explicit required key plus a *best-effort advisory* cross-check against pkg's
 config — so that the fragile parsing only ever powers a warning.
+
+**Partially ruled by the owner, 2026-08-08 — four sub-decisions still open.**
+
+Settled:
+
+| Question | Ruling |
+|---|---|
+| Where does the upstream URL come from? | **jmj's own config** — option A. Discovery from pkg's config is *not* the source. |
+| Is the silent branch/ABI mismatch a hard check? | **No — advisory.** Warn; do not refuse to start. |
+| May the daemon execute `pkg config abi`? | **Yes, permissible.** Settles the constraint question the analysis raised; executing pkg is not "wrapping" it. |
+| Must the advisory cross-check parse UCL? | **No.** The owner notes the file is greppable, and grep plus `pkg config abi` is acceptable for an advisory check. |
+
+Still open — **these block §5.7 and must not be invented** (ground rule 3): the
+**key name**; the **default value**, which is forced to exist by UC-01's
+"defaults are valid by construction" and therefore forces a choice of mirror
+*and* branch; whether the daemon **expands `${ABI}`** (and any other pkg URL
+variables) inside the key; and whether a **plaintext upstream** is refused or
+merely warned about. See the questions raised with the owner on 2026-08-08.
 
 **ADR-005 widened what this setting is.** The facade now proxies the catalogue,
 so the upstream URL no longer names a fallback source: it names **the repository
