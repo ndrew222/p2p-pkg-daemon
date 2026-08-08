@@ -1,6 +1,6 @@
 # ADR-001: Transport & NAT traversal — punt
 
-**Status:** Proposed (drafted 2026-07-07; awaiting vetting by Andrew and Elroy)
+**Status:** Approved
 
 ## Context
 
