@@ -342,12 +342,36 @@ call panics. Both wiring sites go through `Daemon.repository()` for this reason;
 
 ### 5.6 §4.1 cache-layout cross-check — **CLOSED** by §7.5.
 
-### 5.7 Facade rework under ADR-003 — **unclaimed, needs scoping**
+### 5.7 Facade rework under ADR-003 — **BLOCKED. Do not start.**
 
-ADR-003 is approved and nothing is implemented. This is the second-largest piece
-of work in the tree after §5.3 and is largely independent of it: the new
-upstream-mirror config key, streaming the upstream path, and the three document
-corrections listed in §1.
+**`internal/daemon/facade.go` implements a model that has been measured false
+and is not to be extended, tuned or partially migrated until the two rulings
+below land.** The file is not broken in the sense of failing its tests — it
+does exactly what the old spec said — but what the old spec said does not work
+against real pkg. Treat it as frozen, not as a starting point.
+
+The specific mismatch: on a peer miss it returns an HTTP error, on the
+assumption that pkg falls through to another mirror. §7.1 measured that it does
+not — a facade error ends the install. Under ADR-003 that path must instead
+fetch from a configured upstream mirror and stream the bytes through.
+
+**Blocked on:**
+
+| Blocker | Why it blocks this file |
+|---|---|
+| §4.4 — does the facade proxy pkg's catalogue? | Decides what the non-package-path branch does. Today it answers `404`, which §7.1 measured breaks `pkg update` outright. Cannot be written either way without the ruling. |
+| §4.5 — how the upstream mirror is configured | The upstream fetch has no URL to fetch from until this is settled. |
+
+**Not blocked on §5.3**, and §5.3 does not depend on this — they are different
+wires. §5.3 is the work to pick up.
+
+When it unblocks, the scope is: the upstream fetch path (streaming, no spool,
+no `[]byte` — ADR-003), the narrowed `404`/`502` semantics, `If-Modified-Since`
+relay (§6), and the contract comment at the top of the file. The document
+corrections that used to be listed here are **done** — see §1.
+
+A marker is in the file itself; `grep -rn 'BLOCKED (HANDOFF §5.7)' internal/`
+finds it.
 
 ## 6. Known defects
 
@@ -360,6 +384,10 @@ corrections listed in §1.
   correctly does not blacklist us — a dial failure never does — so the cost is
   one wasted attempt per peer, paid by the rest of the swarm. Worth knowing
   before reading a trial's peer logs and concluding the tracker is broken.
+- **`internal/daemon/facade.go` is BLOCKED and implements a superseded model.**
+  Its tests pass, which is misleading: they encode the old contract, so green
+  tests mean it is consistently wrong rather than correct. Frozen until §4.4 and
+  §4.5 are ruled — see §5.7.
 - **The facade has no answer for `If-Modified-Since`.** pkg sends conditional
   `GET`s for catalogue files. Ignoring the header wastes catalogue bandwidth on
   every `pkg update`; answering `304` from a guess would serve a stale

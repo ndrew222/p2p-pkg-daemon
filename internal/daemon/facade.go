@@ -11,12 +11,31 @@ package daemon
 // docs/mirror-facade-spec-v0.1.md is DEPRECATED — do not treat it as the
 // contract.
 //
-// NOTE: this file still implements the superseded model — it returns an HTTP
-// error on a peer miss, on the assumption that pkg falls through to another
-// mirror. Measured false (claude-pkg-mirror-verification.md §7.1): a facade
-// error ends the install. Reworking it is HANDOFF.md §5.7 and is blocked on
-// §4.5 (how the upstream mirror is configured). The path rule below is
-// unaffected and correct.
+// ---------------------------------------------------------------------------
+// BLOCKED (HANDOFF §5.7) — do not extend, tune, or partially migrate this file.
+//
+// It implements a model that has been measured false. On a peer miss it returns
+// an HTTP error, assuming pkg falls through to its next mirror. It does not:
+// fall-through happens between mirrors WITHIN a repository, never between
+// repositories, and jmj is configured as a repository. A facade error ends the
+// install. Measured in docs/logs/claude-pkg-mirror-verification.md §7.1.
+//
+// The tests pass. They encode the old contract, so passing tests are not
+// evidence this file is correct — they are evidence it is consistently wrong.
+//
+// ADR-003 replaces the error path with a fetch from a configured upstream
+// mirror, streamed through without spooling. That rework is blocked on two
+// owner rulings, both in HANDOFF.md:
+//
+//	§4.4  does the facade proxy pkg's catalogue?  -> decides the non-package
+//	      branch, which today answers 404 and breaks `pkg update` outright
+//	§4.5  how is the upstream mirror configured?  -> the fetch has no URL yet
+//
+// Not blocked on, and not blocking, §5.3 (the peer wire) — different surface.
+//
+// The path rule below is UNAFFECTED and correct: measured, owner-ratified, and
+// specified in adr-004-facade-path-rule.md. Do not "fix" it while here.
+// ---------------------------------------------------------------------------
 
 import (
 	"errors"
