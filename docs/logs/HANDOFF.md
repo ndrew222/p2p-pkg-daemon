@@ -63,9 +63,11 @@ per-remote-IP cap, which still blocks §5.3. See the end of §4.2.
 | `docs/logs/elroy-uc1-config.md` §"Decision 3" | **Actively misleading**, and now doubly so. It justifies `buffer_dir` as needing to "persist across reboots". That is wrong: the daemon has no store of its own and serves straight from the pkg cache, and the buffer is per-request and ephemeral. The field it describes no longer exists either — its settings table still lists `listen_addr` and `buffer_dir`. Left unedited because it is another author's work log; read it as history only. |
 | `docs/protocol-spec-v0.1.md` | Historical. Still authoritative for tracker **semantics** (message meanings, state, life cycle); its wire-encoding section is superseded by v0.2. |
 
-Minor: `AGENTS.md` points at `docs/diagrams/uc-*.puml`. No such directory —
-the diagrams are at `docs/uc-*.puml`. Fix it if you are touching `AGENTS.md`
-anyway; it is not worth a commit of its own.
+~~Minor: `AGENTS.md` points at `docs/diagrams/uc-*.puml`. No such directory —
+the diagrams are at `docs/uc-*.puml`.~~ **Fixed**; precedence entry 6 now names
+the real path. Note that `AGENTS.md`'s layout section still describes the tree
+as it was planned, not as it is: `docs/adr/` exists and is not listed there
+either.
 
 ## 2. State of the tree
 
