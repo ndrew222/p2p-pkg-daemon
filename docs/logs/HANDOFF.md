@@ -55,6 +55,19 @@ per-remote-IP cap, which still blocks §5.3. See the end of §4.2.
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
 | `docs/use-case-descriptions.md` | Current for UC-01, UC-02, UC-05, UC-06, UC-07. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
+| `docs/adr/adr-001-transport-nat.md` | Current for what it decides: no NAT traversal, plain HTTP over TCP to the advertised IP:port. **But see the caveat below — its status line still says "Proposed".** |
+
+**`docs/adr/` was missing from this map until now, and the omission hid a
+contradiction.** `AGENTS.md` ground rule 1 makes an ADR one of the three things
+a change may map to, and its hard-constraints list cites ADR-001 as settled
+("no NAT traversal (ADR-001)") — yet ADR-001's own status reads *"Proposed
+(drafted 2026-07-07; awaiting vetting by Andrew and Elroy)"*, and `docs/adr/`
+appears nowhere in AGENTS.md's numbered precedence list. So an un-vetted
+document is already being enforced as a hard constraint, and nothing says
+whether an ADR outranks a use case or the reverse. **Two things for the owner:
+vet ADR-001 (or mark it Accepted if that vetting already happened off-ticket),
+and say where ADRs sit in precedence.** Listed here as existing; no precedence
+rank has been invented for it.
 
 ### Stale — do not act on these without reading §3.1 first
 
