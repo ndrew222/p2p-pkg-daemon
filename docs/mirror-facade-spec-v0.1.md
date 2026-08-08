@@ -305,11 +305,19 @@ expiry (nothing specifies one). See `docs/logs/claude-peer-blacklist.md`.
    this is called settled.
 
 6. **Which upstream mirror, and how it is configured.** ADR-003 requires a
-   configured upstream but deliberately leaves this open: a new config key, TLS
-   to that mirror, and the choice of mirror itself. Note that
-   `pkg+https://pkg.FreeBSD.org/${ABI}/quarterly` resolves via DNS SRV, so the
-   daemon must either resolve SRV itself or be pointed at a concrete host such
-   as `pkgmir.geo.freebsd.org`. **Owner decision — do not invent a key name.**
+   configured upstream but deliberately leaves this open: whether there is a new
+   config key at all, TLS to that mirror, and the choice of mirror itself.
+   **Owner decision — do not invent a key name.**
+
+   ~~`pkg+https://pkg.FreeBSD.org/${ABI}/quarterly` resolves via DNS SRV, so the
+   daemon must either resolve SRV itself or be pointed at a concrete host.~~
+   **Wrong — measured 2026-08-08.** `pkg.FreeBSD.org` is a CNAME to
+   `pkgmir.geo.FreeBSD.org` with ordinary A and AAAA records, so Go's stdlib
+   HTTP client reaches it unaided; and `_https._tcp.pkg.FreeBSD.org` holds a
+   single SRV target (`10 10 443 pkgmir.geo.freebsd.org.`) naming that same
+   host on the standard port. SRV buys nothing plain DNS does not. Do not
+   hand-roll a resolver. See `docs/logs/HANDOFF.md` §4.5 for the candidate of
+   discovering the URL from `/etc/pkg/FreeBSD.conf` rather than adding a key.
 
 7. **Metadata proxying.** See the flag under *Request surface*. ADR-003 makes
    jmj pkg's only mirror, which appears to force it, while this spec and UC-07

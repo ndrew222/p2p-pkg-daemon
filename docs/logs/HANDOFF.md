@@ -226,11 +226,56 @@ implements either reading by accident.
 ### 4.5 Which upstream mirror, and what the config key is called
 
 ADR-003 requires a configured upstream and deliberately leaves the key name, the
-TLS decision and the choice of mirror open. Note that
-`pkg+https://pkg.FreeBSD.org/${ABI}/quarterly` resolves via DNS SRV, so the
-daemon must either resolve SRV itself or be pointed at a concrete host such as
-`pkgmir.geo.freebsd.org`. **Blocks §5.7.** Do not invent a key name — `AGENTS.md`
-ground rule 3.
+TLS decision and the choice of mirror open. **Blocks §5.7.** Do not invent a key
+name — `AGENTS.md` ground rule 3.
+
+**Correction: SRV is not a problem, and an earlier draft of this section said it
+was.** The claim was that the daemon must resolve SRV itself or be pointed at a
+concrete host. Measured, 2026-08-08:
+
+```
+pkg.FreeBSD.org.            CNAME  pkgmir.geo.FreeBSD.org.
+                            A      151.101.{1,65,129,193}.241     (Fastly)
+                            AAAA   2a04:4e42:{::,200::,400::,600::}497
+_https._tcp.pkg.FreeBSD.org SRV    10 10 443 pkgmir.geo.freebsd.org.
+```
+
+`pkg.FreeBSD.org` resolves through ordinary A/AAAA records, so Go's stdlib HTTP
+client reaches it with no special handling. And the SRV record holds **one
+target, on port 443, naming the host the CNAME already resolves to** — so SRV
+buys nothing today that plain DNS does not. Let DNS handle it.
+
+The honest residual: FreeBSD *could* later publish several prioritised SRV
+targets, and pkg would honour them while jmj would not. That is a divergence in
+mirror selection, not a failure — plain DNS still yields a working host — and it
+is not a reason to hand-roll a resolver now.
+
+### Candidate: discover the upstream from pkg's own config instead of a new key
+
+Worth considering before adding a config key, because it gives a zero-config
+happy path. The URL already exists on the machine, in `/etc/pkg/FreeBSD.conf`:
+
+```
+FreeBSD: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/quarterly", ... }
+```
+
+Reading it is consistent with the constraints — it is read-only, and the daemon
+already reads pkg's repository database. Three wrinkles the ruling should
+address:
+
+1. **`${ABI}` is unexpanded in the file.** The daemon must substitute it
+   (`pkg config abi` reports it, e.g. `FreeBSD:15:amd64`).
+2. **The `pkg+` prefix must be stripped** to get a URL an ordinary HTTP client
+   accepts.
+3. **Discovery can come up empty.** Under ADR-003 jmj must be the only
+   *enabled* repository, so the stock block has to be disabled — `enabled: no`
+   leaves it readable and discovery still works, but an operator who deletes the
+   block or renames the repo leaves nothing to find. Whatever is decided needs a
+   defined behaviour there; silently proxying from nowhere is the bad outcome.
+
+A reasonable shape, if the owner wants one: an optional explicit key that
+overrides, defaulting to discovery, and a hard startup failure when neither
+yields a URL. **Not decided — recorded as a candidate, not a design.**
 
 ## 5. Work, in order
 
