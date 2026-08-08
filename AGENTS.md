@@ -16,14 +16,26 @@ read the README and `docs/` instead; this file assumes you are an agent.
 2. `docs/tracker-protocol-spec-v0.2.md` — wire format (HTTP + JSON): endpoints, status codes, JSON shapes. v0.1 remains authoritative for protocol *semantics* (message meanings, state, life cycle, robustness requirements).
 3. `docs/protocol-spec-v0.1.md` — tracker semantics and definition of done. (Titled *Tracker Protocol Spec — v0.1*; the filename has no `tracker-` prefix.)
 4. `docs/peer-transfer-spec-v0.2.md` — the daemon↔daemon wire for package bytes (UC-02 fetch loop, UC-06 serving side): HTTP over TCP, `GET /pkg/<name-version>`, status codes, the size and hash bound, buffering and timeouts.
-5. `docs/mirror-facade-spec-v0.1.md` — the pkg↔daemon wire (UC-02, UC-07): the `All/<name-version>.pkg` path rule and facade status codes.
-6. `docs/use-case-descriptions.md` — UC-01 … UC-07 behaviour spec.
-7. `docs/uc-*.puml` — authoritative where the prose is ambiguous.
-8. `README.md` — orientation only.
+5. `docs/use-case-descriptions.md` — UC-01 … UC-07 behaviour spec. **UC-07 is broken as written — see ground rule 3 and `docs/logs/HANDOFF.md` §4.4.**
+6. `docs/uc-*.puml` — authoritative where the prose is ambiguous.
+7. `README.md` — orientation only.
+
+The pkg↔daemon wire has **no spec file**. It is governed entirely by ADRs:
+ADR-003 for fetch semantics and status codes, ADR-004 for the path rule.
 
 These are **three separate wires** and they do not share a path grammar. The peer wire's `/pkg/<name-version>` namespace is deliberately unlike the facade's `…/All/<name-version>.pkg` so that a seeding daemon cannot be mistaken for, or used as, a pkg mirror. Do not "unify" them.
 
 Deprecated: anything referencing IPFS, CIDs, or `peer_id`. Packages are addressed by `name-version` strings (e.g. `nginx-1.24.0_2`). If you find CID-based code or docs, flag it; do not extend it.
+
+Also deprecated: `docs/mirror-facade-spec-v0.1.md`. It was drafted by an
+implementing agent rather than the spec owner and was never binding; ADR-003
+then overruled the mirror fall-through model it was built on. **There is no
+v0.2 and none is planned** — the facade is governed by ADR-003 (fetch
+semantics, status codes) and ADR-004 (path rule). The file is retained as
+history, with a deprecation banner mapping each section to its successor. Do
+not implement from it, and do not cite it as a contract. The single caveat is
+in that banner: until ADR-004 is approved, its *Request surface* section is
+still the only specification of a path rule that shipped code depends on.
 
 Also deprecated: `internal/peerwire`, the interim length-prefixed binary framing for peer transfers, and its `MaxPayload` constant. It was explicitly a placeholder until the peer wire spec landed. That spec is now `docs/peer-transfer-spec-v0.2.md` and it chooses HTTP, so the package is to be deleted, not extended or chunked.
 

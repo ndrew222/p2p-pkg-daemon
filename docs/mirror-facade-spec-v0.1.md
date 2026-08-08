@@ -1,4 +1,26 @@
-# Mirror Facade Spec — v0.1
+# Mirror Facade Spec — v0.1 — **DEPRECATED**
+
+> # ⛔ DEPRECATED — do not implement from this document.
+>
+> **Deprecated by the owner, 2026-08-08. `docs/adr/adr-003-facade-fetch-semantics.md` is its successor.** There is no v0.2 and none is planned; the facade is governed by ADRs from here.
+>
+> It was never binding in the first place — its own status block below records that it was drafted by an implementing agent rather than the spec owner, and that the status codes "remain open to revision". ADR-003 then overruled the fall-through model the whole document was built on.
+>
+> **Where its content went:**
+>
+> | Section | Now governed by |
+> |---|---|
+> | Fetch semantics, status codes, verification placement, no-cache rule | `docs/adr/adr-003-facade-fetch-semantics.md` |
+> | *Request surface* — the `All/` + `Hashed/` + `~hash10` path rule, and `GET`-only | `docs/adr/adr-004-facade-path-rule.md` **(Proposed — needs vetting)** |
+> | Peer blacklist | UC-02 §7/§11c and `docs/logs/claude-peer-blacklist.md` |
+> | Open questions 6 and 7 (upstream mirror config; metadata proxying) | `docs/logs/HANDOFF.md` §4.5 and §4.4 — both still open |
+>
+> **Until ADR-004 is approved, the path rule in *Request surface* below is still the only specification of a rule that shipped code depends on** (`internal/daemon/facade.go`, `watcher.go`, `repodb.go`). That is the one part of this document not yet safe to ignore. Everything else is history: kept because it records why the design changed, not because it should be obeyed.
+>
+> Retained rather than deleted for the same reason the struck-through text inside it is retained — a reader who finds only the conclusion has nothing to stop them re-proposing the idea that was measured wrong.
+
+---
+
 
 *The pkg↔daemon HTTP surface (UC-02, UC-07). This is one of three separate
 wires: `tracker-protocol-spec-v0.2.md` governs daemon↔tracker and

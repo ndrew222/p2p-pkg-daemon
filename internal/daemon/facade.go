@@ -2,13 +2,21 @@ package daemon
 
 // The mirror facade: the HTTP surface pkg talks to (UC-02, UC-07).
 //
-// The daemon is pkg's first mirror. pkg makes ordinary mirror requests; the
-// facade either returns verified package bytes or an HTTP error, and pkg's own
-// mirror fall-through handles the rest. pkg is never modified.
+// The daemon is pkg's only mirror. pkg makes ordinary mirror requests; the
+// facade serves verified package bytes from a peer, or proxies to a configured
+// upstream mirror when no peer can supply them. pkg is never modified.
 //
-// Contract: docs/mirror-facade-spec-v0.1.md. The path rule there is derived
-// from a worked mirror URL; the status codes are an implementer's choice
-// recorded in that document, because the use cases say only "an HTTP error".
+// Contract: docs/adr/adr-003-facade-fetch-semantics.md for fetch semantics and
+// status codes, docs/adr/adr-004-facade-path-rule.md for the path rule.
+// docs/mirror-facade-spec-v0.1.md is DEPRECATED — do not treat it as the
+// contract.
+//
+// NOTE: this file still implements the superseded model — it returns an HTTP
+// error on a peer miss, on the assumption that pkg falls through to another
+// mirror. Measured false (claude-pkg-mirror-verification.md §7.1): a facade
+// error ends the install. Reworking it is HANDOFF.md §5.7 and is blocked on
+// §4.5 (how the upstream mirror is configured). The path rule below is
+// unaffected and correct.
 
 import (
 	"errors"
