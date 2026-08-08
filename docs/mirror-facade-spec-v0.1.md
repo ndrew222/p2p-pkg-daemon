@@ -12,20 +12,58 @@ by the spec owner.** The status codes were chosen by the implementer because
 the use cases specify only "an HTTP error", and remain open to revision — treat
 those as a record of what the code does, not as a ratified contract.
 
+> **Partly superseded by `docs/adr/adr-003-facade-fetch-semantics.md` (approved).**
+> This spec was written on the assumption that a facade error makes pkg fall
+> through to its next configured mirror. That assumption was measured and is
+> **false**: pkg falls through between *mirrors within one repository*, never
+> between *repositories*, and jmj is configured as a repository. A facade error
+> ends the install. ADR-003 replaces the fall-through model with **proxy to an
+> upstream mirror on a peer miss**, and outranks this document wherever the two
+> disagree. Evidence: `docs/logs/claude-pkg-mirror-verification.md` §7.1.
+>
+> Revised below: *What the facade is*, *Status codes*, *What the facade does
+> not do*, and open questions 1, 4 and 5. **Unaffected:** the whole *Request
+> surface* section — the `All/` + `Hashed/` + `~hash10` path rule is measured,
+> ratified and independent of what the facade does after it has parsed a path.
+
 The **path rule is ratified.** It began as a generalisation from one worked
 example; the `Hashed/` level and the `~hash10` suffix were then measured
 against pkg 2.7.5 and the corrected rule was accepted by the owner.
 
 ## What the facade is
 
-The daemon is configured as pkg's **first mirror**. pkg — never the user —
-makes ordinary HTTP mirror requests to it. The facade answers exactly one kind
-of request (a package file it can fetch from a peer and verify) and returns an
-HTTP error for everything else, which makes pkg fall through to its next
-configured mirror.
+The daemon is configured as pkg's **only mirror** (ADR-003). pkg — never the
+user — makes ordinary HTTP mirror requests to it. The facade tries to answer a
+package-file request from a peer; when it cannot, it **fetches the package from
+a configured upstream mirror and serves those bytes**. There is no next mirror
+to fall through to, so an error is a failed install rather than a redirection.
 
-pkg is never modified. Fall-through is pkg's own native mirror behaviour; the
-facade's only lever is the status code.
+pkg is never modified. What changed is that the facade's lever is no longer the
+status code — it is where the bytes come from.
+
+**Verification placement is asymmetric** (ADR-003):
+
+- **Peer path — spool and verify before serving.** Stream into `temp_dir`,
+  bounded by the expected size, hash incrementally, serve only on a match. The
+  buffer buys the ability to abandon a bad peer and try another without pkg
+  ever seeing a failure; with `MAX_PEERS = 3` that is worth having, and the
+  blacklist needs the verdict anyway.
+- **Upstream path — stream straight through.** No spool. Upstream is the
+  terminal source: if its bytes are bad there is no next source to try, so
+  withholding them buys nothing. pkg re-verifies every byte it is handed
+  against the same signed catalogue (UC-02 §10), which is where integrity
+  actually comes from. A mid-transfer upstream failure yields a short body
+  against a promised `Content-Length` — exactly what pkg sees from a real
+  mirror having a bad day, and handles routinely.
+
+The exact `Content-Length` for the upstream path comes from `packages.pkgsize`
+in the same repository-database row as the hash, so the facade commits to a
+correct length rather than guessing.
+
+**Streaming must not reintroduce a `[]byte`.** The largest package is 2.83 GiB
+and the reference host has 1 GiB; `AGENTS.md` forbids whole-package residency
+on the peer wire and the same discipline binds the upstream path, which must be
+written that way from the start rather than retrofitted.
 
 ## Request surface
 
@@ -96,48 +134,83 @@ part of a real version string and produce an identifier no peer holds.
 The signed catalog is the root of the integrity model and must always come from
 a real mirror. The daemon never serves, caches or proxies metadata.
 
+> ⚠️ **OPEN — do not implement either reading. Ask the owner.** The sentence
+> above is in direct tension with ADR-003 and the ADR does not settle it. Its
+> *Decision* section rules only on package files, but it also makes jmj pkg's
+> **only** mirror — and §7.1 measured that a facade which fails a metadata
+> request breaks `pkg update` outright, because there is no second repository
+> to fall through to. The §7 harness in fact proxied the signed catalogue from
+> a real mirror, and ADR-003 cites that run approvingly and expects the facade
+> to relay upstream's `304` to a conditional `GET`, which is metadata
+> proxying. So the model ADR-003 was drafted from appears to require it.
+>
+> Note that relaying is not the same as *vouching*: the bytes still originate
+> at the real mirror and pkg still verifies the repository signature itself, so
+> "the catalog comes from a real mirror" can survive a pass-through. But
+> "never proxies metadata" cannot. **Which of the two sentences gives way is an
+> owner ruling under ground rule 2, and it needs its own ADR** — it also
+> decides UC-07, which is built end to end on the fall-through that does not
+> exist.
+
 ### Methods
 
-`GET` only. See the open questions — `HEAD` is unresolved.
+`GET` only. Measured: pkg 2.7.5 issues nothing else against a mirror — see
+open questions 1 and 5.
 
 ## Status codes
 
-The use cases say only "an HTTP error" for every failure. These codes are an
-implementer's choice. The governing convention:
+**Revised under ADR-003.** The old table treated every non-`200` as a
+fall-through signal — "pkg will just ask the next mirror" — and chose between
+`404` and `502` purely for operators reading logs. That premise is gone. A
+non-`200` now **fails the install**, so the interesting question is no longer
+which code to send but *when the facade is entitled to send one at all*. The
+answer is: only when it can prove it has nothing to serve.
 
-> **4xx = this mirror legitimately does not have it. 5xx = this mirror is
-> broken right now.**
+The governing rule is now:
 
-Every non-200 makes pkg fall through to the next mirror, so the split is for
-operators reading logs, not for pkg. Nothing in the daemon's behaviour depends
-on which one is sent.
+> **Every peer-side failure falls through to upstream, not to pkg.** An error
+> reaches pkg only when the peers *and* upstream have both failed, or when the
+> request is one no mirror could satisfy.
 
 | Condition | Code | UC |
 |---|---|---|
 | Bytes fetched from a peer and hash-verified | `200` | UC-02 §10 |
-| Non-package-file path (metadata, catalog, anything not `All/*.pkg`) | `404` | UC-07 §3 |
+| Bytes streamed from the upstream mirror after a peer miss | `200` | ADR-003 |
 | Path is under `All/` and ends `.pkg` but the stem is not a valid name-version | `400` | — |
 | Package is not in pkg's repository database (no expected hash) | `404` | — |
-| Tracker returned an empty peer list | `404` | UC-02 §7b |
-| Tracker unreachable, timed out, or sent an unparseable reply | `502` | UC-02 §6a |
-| All peers tried; none produced verifying bytes (unreachable, errored, or hash mismatch) | `502` | UC-02 §9d |
-| Every peer on the list is already blacklisted, so none is tried | `502` | UC-02 §7, §9d |
 | Method other than `GET` | `405` | — |
+| Peers unavailable *and* the upstream fetch also failed | `502` | ADR-003 |
+| Non-package-file path (metadata, catalog, anything not `All/*.pkg`) | ⚠️ **open** | UC-07 — see the warning above |
 
-Rationale for the two debatable ones:
+"Peers unavailable" collapses four conditions the old table listed separately —
+tracker unreachable, tracker returned an empty list, every holder blacklisted,
+and all holders tried without verifying bytes. Under ADR-003 they no longer
+need distinguishing in the response, because **all four now go to upstream**
+and none of them is visible to pkg on its own. They remain worth
+distinguishing in the *log*, and diagnostics should keep naming which one
+occurred.
 
-- **Empty peer list → `404`, not `502`.** The tracker answered correctly; this
-  mirror simply holds nothing. `GET /peers` returning `{"peers": []}` is an
-  explicitly valid answer in the tracker spec, not an error, and the facade
-  mirrors that.
-- **All peers exhausted → `502`, not `404`.** Peers claimed to hold it and
-  failed to deliver. That is an upstream fault, and it is the signal worth
-  alerting on — a `404` would hide a swarm that is silently serving corrupt
-  bytes.
+Rationale for what is left:
+
+- **`404` narrows to "provably absent."** It stops being the fall-through
+  signal and survives only for a package the repository database does not
+  contain — a request the facade can prove is unanswerable, where going to
+  upstream would be pointless because there is no expected hash or size to
+  bound the transfer with. UC-06 §5b's re-announce obligation attaches to the
+  *peer* wire's `404`, not to this one, and is untouched.
+- **`502` narrows to "both sources failed."** It is now the only case in which
+  the facade has genuinely nothing to serve, which makes it the code worth
+  alerting on. Previously it was one of four routine outcomes.
+- **An empty peer list is no longer an error at all.** It is the common case —
+  a package nobody nearby has yet — and it is exactly what the upstream path
+  exists to absorb. Answering `404` to it, as the old table did, would fail
+  every first-of-its-kind install.
 
 `200` responses carry `Content-Type: application/octet-stream` and an accurate
-`Content-Length`. Error responses carry a short `text/plain` body; pkg ignores
-it, but a human running `curl` against the daemon should not get a blank page.
+`Content-Length` — on the upstream path taken from `packages.pkgsize`, not from
+counting bytes as they arrive. Error responses carry a short `text/plain` body;
+pkg ignores it, but a human running `curl` against the daemon should not get a
+blank page.
 
 ## Peer blacklist
 
@@ -150,22 +223,36 @@ expiry (nothing specifies one). See `docs/logs/claude-peer-blacklist.md`.
 
 ## What the facade does not do
 
-- **No caching.** The daemon has no store. Every request is a fresh fetch.
-- **No retry after a returned error.** One request, one verdict; pkg's
-  fall-through is the retry mechanism.
-- **No metadata proxying**, per UC-07 and the integrity model.
+- **No caching — including of what it proxies.** The daemon has no store and
+  ADR-003 does not create one. The upstream bytes pass through the facade, so
+  it plainly *could* cache them, and it must not: `AGENTS.md` allows writes
+  only to the temp buffer directory, UC-02 assumes "the daemon has no package
+  store of its own", and UC-06 assumes "there is no daemon-owned store to
+  poll". It would also be pointless — UC-02 §10 has pkg write the served bytes
+  into `/var/cache/pkg`, which is the directory the daemon seeds from, so a
+  proxied package joins the swarm anyway and a facade cache would be a second
+  copy of the same bytes on the same disk. And it would reinstate precisely the
+  I/O that streaming was chosen to avoid.
+- **No retry after a returned error.** One request, one verdict. Note this no
+  longer means what it used to: the retry mechanism is now the facade's own
+  peer loop followed by the upstream fetch, not pkg's fall-through. By the time
+  a code reaches pkg, every source has been tried.
+- **No metadata proxying**, per UC-07 and the integrity model — ⚠️ **but see
+  the open flag under *Request surface*.** ADR-003 appears to require the
+  opposite and does not say so explicitly. Unresolved.
 
 ## Open questions — not resolved here
 
-1. **`HEAD` requests.** Currently `405`. The stated objection was that the
-   facade cannot answer a `HEAD` honestly without performing the whole fetch,
-   because it does not know the size until it has the bytes. That premise no
-   longer holds: `packages.pkgsize` gives the exact size from the same
-   repository-database row as the hash, and `peer-transfer-spec-v0.2.md` relies
-   on it. The facade could therefore answer `HEAD` truthfully without fetching
-   anything. Still **open**, because the remaining question — whether pkg
-   issues `HEAD` against mirrors at all, and what it does with the answer — is
-   for the UC-07 integration smoke test, not for this spec.
+1. **`HEAD` requests.** ~~Still open pending the UC-07 smoke test.~~
+   **Answered — leave it at `405`.** The measurement has been taken
+   (`docs/logs/claude-pkg-mirror-verification.md` §7.3): across a catalogue
+   refresh, a `pkg fetch` and a real `pkg install`, **pkg 2.7.5 issued zero
+   `HEAD` requests** against the mirror. Every request was a plain `GET`;
+   user-agents `pkg/2.7.5` and `fetch libfetch/2.0`. Since nothing asks, the
+   question of whether the facade *could* answer honestly — it could, via
+   `packages.pkgsize` — is moot, and `405` costs nothing. Scope the result
+   honestly: it says pkg does not use `HEAD` on the paths exercised, not that
+   it never will.
 2. **Hash format.** ~~The facade asks the repository database for a hex SHA-256
    string, matching the assumption already isolated in
    `internal/peer/fetch.go`. Unratified.~~ **Resolved empirically:**
@@ -192,5 +279,38 @@ expiry (nothing specifies one). See `docs/logs/claude-peer-blacklist.md`.
    memory saving is **not** yet realised: `peer.FetchFromPeer` still returns a
    `[]byte`, so the whole package is resident before the spool begins. That
    half arrives with the peer wire migration.
-5. **Range requests.** pkg may issue them for resumed downloads. Unhandled;
-   the facade ignores `Range` and returns the whole file with `200`.
+
+   **ADR-003 narrows why the spool exists, and confines it to one path.** The
+   stated reason — "verification needs the whole file before any byte may reach
+   pkg" — was never quite true, because integrity comes from pkg re-verifying
+   (UC-02 §10), not from the buffer. What the buffer actually buys is the
+   ability to abandon a bad source and try another *without pkg seeing a
+   failure*, since a `200` is committed the moment its first body byte is
+   written. That is worth having on the peer path, where `MAX_PEERS = 3`
+   leaves somewhere to go, and worth nothing on the upstream path, where there
+   is no next source. So `temp_dir` keeps its consumer and its honest
+   justification is "**retry** needs the whole file"; the upstream path does
+   not spool at all.
+5. **Range requests.** ~~pkg may issue them for resumed downloads.~~
+   **Measured: it does not** (§7.3) — zero `Range` headers across every
+   observed transfer. Ignoring `Range` and returning the whole file with `200`
+   is therefore correct for the normal path, and it stays.
+
+   **The caveat is real and not yet closed:** every observed transfer was small
+   and none was interrupted. Resume-after-interrupt was never exercised, and a
+   `Range` request is exactly what would plausibly appear there. A facade that
+   ignores `Range` and answers `200` to a resume attempt hands back the whole
+   file where the client asked for a suffix — pkg would then have a body that
+   does not match what it asked for. Worth an interrupted-download test before
+   this is called settled.
+
+6. **Which upstream mirror, and how it is configured.** ADR-003 requires a
+   configured upstream but deliberately leaves this open: a new config key, TLS
+   to that mirror, and the choice of mirror itself. Note that
+   `pkg+https://pkg.FreeBSD.org/${ABI}/quarterly` resolves via DNS SRV, so the
+   daemon must either resolve SRV itself or be pointed at a concrete host such
+   as `pkgmir.geo.freebsd.org`. **Owner decision — do not invent a key name.**
+
+7. **Metadata proxying.** See the flag under *Request surface*. ADR-003 makes
+   jmj pkg's only mirror, which appears to force it, while this spec and UC-07
+   forbid it. Needs its own ADR.

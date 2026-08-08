@@ -38,8 +38,13 @@ commit as the work.
 
 Current branch: `main`; everything through `bc5fabf` is merged.
 
-**Nothing is blocked on an owner decision as of this handoff.** ADR-001, -002
-and -003 are all Approved. §5.3 is the next work item and is fully unblocked.
+ADR-001, -002 and -003 are all Approved, and **§5.3 is the next work item and is
+fully unblocked.**
+
+**One thing is blocked on an owner decision: whether the facade proxies pkg's
+metadata.** It surfaced while bringing the specs into line with ADR-003 and it
+is not a detail — UC-07 is built end to end on a fall-through that does not
+exist, so as written it cannot be implemented at all. See §4.1.
 
 ## 1. Document map — what to trust
 
@@ -52,29 +57,39 @@ and -003 are all Approved. §5.3 is the next work item and is fully unblocked.
 | `docs/adr/adr-002-serving-side-concurrency.md` | **Approved.** Global *and* per-remote-IP semaphores, `503` when either is full, default `0` = unlimited. Implement with §5.3. |
 | `docs/adr/adr-003-facade-fetch-semantics.md` | **Approved.** Facade proxies to upstream on a peer miss; peer path spools, upstream path streams; no facade cache. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
-| `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. One gap noted below. |
+| `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
 | `docs/uc-06.puml` | Current as of the HTTP peer wire. |
 
-### Superseded by an approved ADR — **do not implement from these**
+### Brought into line with the ADRs — **done, no longer a trap**
 
-This is the most important part of this file. Three documents describe a model
-that has been **measured false** and overruled, and none has been edited yet.
+Four documents encoded the fall-through model that §7.1 measured false. They
+have now been corrected in place; the old text is struck through rather than
+deleted, so the reasoning that changed stays visible.
 
-| Document | What is wrong |
+| Document | What changed |
 |---|---|
-| `docs/use-case-descriptions.md` UC-02 | Its assumptions still say *"the 'fall back to mirror' outcomes are plain HTTP errors — pkg's native mirror fallback does the rest"*. **ADR-003 supersedes this.** pkg does not fall through between repositories; a facade `404` ends the install. Every UC-02 error state concluding "pkg falls through to its next mirror" is wrong. |
-| `docs/mirror-facade-spec-v0.1.md` | Its status-code table encodes the same assumption; `404` and `502` both change meaning under ADR-003. The `All/Hashed/` + `~hash10` path rule in it is unaffected and still correct. |
-| `docs/uc-02.puml` | The same failure model, in diagram form. |
+| `docs/use-case-descriptions.md` UC-02 | Description, precondition, error-state list and the assumptions paragraph now carry the ADR-003 model. New alternative flow **8f–10f (upstream fallback)** and error state **9g–11g (upstream also failed → terminal `502`)**. Flows 6a/7a, 7b/8b and 9d/10d no longer end in "pkg tries its next mirror" — they route to 8f. |
+| `docs/mirror-facade-spec-v0.1.md` | Supersession banner at the top; *What the facade is* rewritten around proxy-with-fallback and the asymmetric verification placement; status-code table rebuilt (see below); *What the facade does not do* now covers the no-facade-cache ruling. |
+| `docs/uc-02.puml` | New `Upstream Mirror` participant and an `opt no verified bytes from any peer` block carrying both outcomes. Renders clean (`plantuml -checkonly`). |
+| `docs/peer-transfer-spec-v0.2.md` | ADR-002's `503`: response-table row, a *Serving side obligations* bullet, the "`503` must not re-announce" rule next to the `404` obligation, and the concurrency row in *Deliberately unspecified* closed. |
 
-**Bringing these three into line with ADR-003 is unclaimed work.** It is
-mechanical rather than decisional — the ruling exists, the documents have not
-caught up.
+**The facade status table is the change most worth reading before touching the
+facade.** Four separate conditions the old table answered — tracker unreachable,
+empty peer list, all holders blacklisted, all holders tried and failed —
+collapsed into one row, because under ADR-003 all four go to upstream and none
+is visible to pkg. `404` narrowed to "provably absent from the repository
+database"; `502` narrowed to "peers *and* upstream both failed". An empty peer
+list is **no longer an error at all** — it is the common case, and answering
+`404` to it would have failed every first-of-its-kind install.
 
-Also: `peer-transfer-spec-v0.2.md` does not list the `503` that ADR-002
-mandates. ADR-002 outranks it, so §5.3 proceeds regardless; the spec needs a
-`503` row as a consistency fix.
+Also closed, from the §7.3 measurement: facade open questions **1 (`HEAD`)** and
+**5 (`Range`)**. pkg 2.7.5 issues neither — every request across a catalogue
+refresh, a `pkg fetch` and a real `pkg install` was a plain `GET`. Both stay as
+they are. The `Range` caveat is recorded in the spec: no observed transfer was
+ever interrupted, so resume-after-interrupt is untested and is the one place a
+`Range` request would plausibly appear.
 
 ### Historical
 
@@ -134,11 +149,55 @@ All settled and documented elsewhere. Read the linked document, not a summary.
 | Verification rulings (§4.3, §5.5) | `docs/logs/claude-verification-rulings.md` | First-wins on collisions; malformed rows dropped; only a hash mismatch blacklists. |
 | Peer transfer wire | `docs/peer-transfer-spec-v0.2.md` | HTTP over TCP, `/pkg/<name-version>`, fuzz target. |
 
-## 4. Blocked — nothing
+## 4. Blocked on the owner
 
 §4.1, §4.2 and §4.3 were the standing blockers. All three are resolved — §4.2 by
 ADR-002, the other two by the verification rulings. The numbers are retained
-because other documents cite them.
+because other documents cite them. §4.1's number is reused below for the one
+live blocker; the cache-layout question it originally named is closed (§5.6).
+
+### 4.1 Does the facade proxy pkg's metadata? — **NEEDS AN OWNER RULING**
+
+Two ratified statements now contradict each other and no ADR settles it.
+
+- `mirror-facade-spec-v0.1.md` and UC-07: *"The daemon never serves, caches or
+  proxies metadata"*, because the signed catalog is the root of the integrity
+  model and must come from a real mirror.
+- ADR-003 makes jmj pkg's **only** mirror. §7.1 measured that a facade which
+  errors on a metadata path breaks `pkg update` outright — there is no second
+  repository to fall through to. ADR-003 also expects the facade to forward a
+  conditional `GET` and relay upstream's `304`, which *is* metadata proxying,
+  and the §7 harness proxied the signed catalogue successfully (37,789
+  packages, `signature_type: fingerprints` intact).
+
+So the design as it stands cannot run: refuse metadata and `pkg update` fails;
+proxy it and a ratified sentence is violated. **Do not resolve this by reading
+ADR-003 generously** — its *Decision* section rules on package files only, and
+ground rule 2 makes this an owner call.
+
+Worth noting for whoever rules: relaying is not the same as vouching. The bytes
+still originate at the real mirror and pkg still verifies the repository
+signature itself, so *"the catalog comes from a real mirror"* can survive a
+pass-through. It is only *"never proxies metadata"* that cannot.
+
+**What it blocks:** all of UC-07, and any end-to-end use of the daemon, since
+`pkg update` precedes every install. It does **not** block §5.3, which is peer
+wire only. **What unblocks it:** one ADR. **Cost of leaving it:** the specs stay
+mutually contradictory, and the facade cannot be finished — §5.7 stops at the
+package path.
+
+Flagged in place at `docs/mirror-facade-spec-v0.1.md` (open question 7 and a
+warning under *Request surface*) and at UC-07's description, so nobody
+implements either reading by accident.
+
+### 4.2 Which upstream mirror, and what the config key is called
+
+ADR-003 requires a configured upstream and deliberately leaves the key name, the
+TLS decision and the choice of mirror open. Note that
+`pkg+https://pkg.FreeBSD.org/${ABI}/quarterly` resolves via DNS SRV, so the
+daemon must either resolve SRV itself or be pointed at a concrete host such as
+`pkgmir.geo.freebsd.org`. **Blocks §5.7.** Do not invent a key name — `AGENTS.md`
+ground rule 3.
 
 ## 5. Work, in order
 
