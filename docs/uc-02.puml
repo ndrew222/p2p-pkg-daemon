@@ -6,6 +6,7 @@ participant pkg
 participant "P2P Daemon" as Daemon
 participant "Tracker" as Tracker
 participant "Peer Daemon\n(serving side, UC-06)" as Peer
+participant "Upstream Mirror\n(ADR-003)" as Upstream
 
 User -> pkg: pkg.install(packageName-version)
 
@@ -59,18 +60,42 @@ else package name is valid
                 else hash mismatch, size breach, or non-200 reply
                 Daemon -> Daemon : removeTempFile()
                 Daemon -> Daemon : markPeerUntrusted(peer), on hash mismatch only
-                note right : Only a HASH mismatch blacklists.\nA size breach (Content-Length disagrees,\nor the body overruns expectedSize)\nabandons the peer without blacklisting:\nwrong-length bytes fail the hash anyway,\nso a size verdict is a second route to\nthe same answer. A 404 means the peer\nno longer holds it, not that it lied.\nLocal blacklist only.\nSelect next peer and retry.\nIf all peers exhausted →\nHTTP error so pkg falls\nback to next mirror.
+                note right : Only a HASH mismatch blacklists.\nA size breach (Content-Length disagrees,\nor the body overruns expectedSize)\nabandons the peer without blacklisting:\nwrong-length bytes fail the hash anyway,\nso a size verdict is a second route to\nthe same answer. A 404 means the peer\nno longer holds it, not that it lied.\nLocal blacklist only.\nSelect next peer and retry.\nIf all peers exhausted →\nupstream fallback (ADR-003).\npkg has no next mirror to\nfall through to.
                 end
                 end
 
             else tracker has no peer
                 Tracker --> Daemon: empty
                 deactivate Tracker
-                Daemon --> pkg : HTTP error → pkg tries next mirror
+                note right of Daemon : Not a fault. Nobody nearby holds\nit yet — the common case, and\nexactly what upstream absorbs.
             end
         else tracker unreachable
             Daemon -> Daemon : No response from tracker after a few seconds
-            Daemon --> pkg : HTTP error → pkg tries next mirror
+        end
+
+        opt no verified bytes from any peer
+            note over Daemon : UPSTREAM FALLBACK (ADR-003).\nEntered from: tracker unreachable,\nempty peer list, every holder blacklisted,\nor all holders tried without verifying bytes.\npkg is NOT asked to fall through — it cannot.\nFall-through exists between mirrors WITHIN a\nrepository, never between repositories, and\njmj is configured as a repository. Measured:\ndocs/logs/claude-pkg-mirror-verification.md §7.1
+
+            Daemon -> Upstream : GET the package
+            activate Upstream
+
+            alt upstream answers 200
+                Upstream --> Daemon : 200 + body
+                Daemon --> pkg : 200 streamed straight through,\nContent-Length = packages.pkgsize
+                note right : NO spool on this path. Upstream is the\nterminal source, so there is no next source\nto abandon it for and withholding bytes buys\nnothing. Integrity is pkg's: it re-verifies\nagainst the same signed catalogue. Hash\nincrementally for diagnostics only.\nNothing above the copy buffer is resident —\na []byte here is the same regression it is\non the peer wire.
+                pkg -> pkg : verifyHash + save to pkg cache
+                pkg -> pkg : install(packageName-version)
+                pkg --> User : success
+
+                Daemon -> Daemon : cacheWatcher detects new package
+                note right : A proxied package joins the swarm\nexactly as a peer-fetched one does.
+
+            else upstream unreachable or non-200
+                Upstream --> Daemon : error
+                Daemon --> pkg : 502 — TERMINAL
+                note right : There is no next mirror, so pkg reports\na failed install. This is the only case in\nwhich the daemon genuinely has nothing to\nserve, which is what makes it the condition\nworth alerting on.\n\nIf upstream instead dies MID-BODY, after the\n200 is committed, pkg sees a short body against\nthe promised Content-Length — indistinguishable\nfrom a real mirror having a bad day, and handled\nroutinely. Not a new failure mode.
+            end
+            deactivate Upstream
         end
     end
 deactivate Daemon

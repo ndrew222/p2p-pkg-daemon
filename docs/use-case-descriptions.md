@@ -43,22 +43,23 @@
  
 | UC-02 | Install Package via P2P (download package) |  |  |
 | :---- | ----- | :---- | ----- |
-| **Description** | When the user installs a package that is not already cached, pkg — not the user — contacts the daemon, which acts as pkg's first HTTP mirror. The daemon asks the tracker for peers, downloads the package from a peer into a temporary buffer, verifies the hash against pkg's repository database, and serves the verified bytes to pkg as an ordinary mirror response. Every failure becomes an HTTP error, which makes pkg fall through to its next configured mirror. |  |  |
+| **Description** | When the user installs a package that is not already cached, pkg — not the user — contacts the daemon, which acts as pkg's **only** HTTP mirror. The daemon asks the tracker for peers, downloads the package from a peer into a temporary buffer, verifies the hash against pkg's repository database, and serves the verified bytes to pkg as an ordinary mirror response. **When no peer can supply it, the daemon fetches the package from a configured upstream mirror and streams those bytes through to pkg** (ADR-003). pkg is never asked to fall through to another mirror, because it cannot: fall-through happens between mirrors *within* a repository, and jmj is configured as a repository. An HTTP error therefore ends the install rather than redirecting it, and the daemon emits one only when peers and upstream have both failed. |  |  |
 | **Actors** | Primary | User (runs `pkg install`; never talks to the daemon directly) |  |
 |  | Secondary | pkg (the daemon's actual client), P2P Daemon, Tracker, remote serving daemons (UC-06) |  |
 | **Trigger** | `pkg install <packageName-version>` |  |  |
-| **Precondition** | Daemon is running and configured as pkg's first mirror. Tracker address is configured. Network connectivity is available. Daemon has read-only access to pkg's repository database. |  |  |
+| **Precondition** | Daemon is running and configured as pkg's only mirror. Tracker address is configured. An upstream mirror is configured (ADR-003). Network connectivity is available. Daemon has read-only access to pkg's repository database. |  |  |
 | **Postcondition** | Package is installed. The package file is in pkg's cache, written by pkg itself. The cache watcher announces it to the tracker (UC-05), making this machine a seeder. |  |  |
-| **Error States** | 1 | Tracker unreachable (network timeout; an unparseable tracker response is treated the same way) |  |
-|  | 2 | Tracker has no peers for the package |  |
+| **Error States** | 1 | Tracker unreachable (network timeout; an unparseable tracker response is treated the same way) — *falls through to upstream* |  |
+|  | 2 | Tracker has no peers for the package — *falls through to upstream; this is the common case, not an exceptional one* |  |
 |  | 3 | Peer sends corrupt data (hash mismatch) |  |
-|  | 4 | All peers exhausted |  |
+|  | 4 | All peers exhausted — *falls through to upstream* |  |
 |  | 5 | Peer unreachable (connection timeout, e.g. peer behind NAT) |  |
+|  | 6 | Upstream fetch also failed — **the only state that reaches pkg as an error** (ADR-003) |  |
 | **Operational Flow** | **Step** | **Action** |  |
 |  | 1 | User runs `pkg install packageName-version` |  |
 |  | 2 | pkg searches its repository database; an unknown name is rejected by pkg itself and the daemon is never involved |  |
 |  | 3 | pkg checks its own cache; if the package is already there, pkg installs it directly and the flow ends |  |
-|  | 4 | pkg requests the package over HTTP from the daemon, its first mirror; multiple packages are independent requests |  |
+|  | 4 | pkg requests the package over HTTP from the daemon, its only mirror; multiple packages are independent requests |  |
 |  | 5 | Daemon sends IWant(packageName-version) to the tracker |  |
 |  | 6 | Tracker returns a list of peers (IP:port) that have announced the package |  |
 |  | 7 | Daemon tries the peers in the order returned, skipping any on its local blacklist |  |
@@ -69,12 +70,10 @@
 | **Alternative Flow** | **Error State:** Tracker unreachable |  |  |
 |  | **Step** | **Action** |  |
 |  | 5a | IWant gets no response from the tracker after a few seconds |  |
-|  | 6a | Daemon returns an HTTP error to pkg |  |
-|  | 7a | pkg tries its next mirror |  |
+|  | 6a | Daemon abandons the peer loop and enters the upstream fallback at step 8f |  |
 |  | **Error State:** Tracker has no peers |  |  |
 |  | 6b | Tracker returns an empty peer list |  |
-|  | 7b | Daemon returns an HTTP error to pkg |  |
-|  | 8b | pkg tries its next mirror |  |
+|  | 7b | Daemon enters the upstream fallback at step 8f. This is the ordinary path for any package the swarm has not seen yet — the common case, not a fault — and is not logged as one |  |
 |  | **Error State:** Peer sends corrupt data |  |  |
 |  | 9c | The computed hash does not match the repository database. A transfer that breaches the expected size — a `Content-Length` that disagrees, or a body that overruns it — is abandoned where it happens and never reaches this step |  |
 |  | 10c | Remove the temporary file |  |
@@ -82,12 +81,19 @@
 |  | 12c | Select the next peer and re-enter the loop at step 8 |  |
 |  | **Error State:** All peers exhausted |  |  |
 |  | 8d | The loop ends with every peer tried and no verified download |  |
-|  | 9d | Daemon returns an HTTP error to pkg |  |
-|  | 10d | pkg tries its next mirror |  |
+|  | 9d | Daemon enters the upstream fallback at step 8f |  |
 |  | **Error State:** Peer unreachable |  |  |
 |  | 8e | Connection to the peer times out |  |
 |  | 9e | Move on to the next peer in the list |  |
-| **Assumptions/ Comments** | The daemon has no package store of its own; it buffers in a temporary directory (configurable, defaulting to the system temp directory) and needs write access only there. The buffer is per-request and ephemeral: it exists because verification needs the whole file before any byte may reach pkg, not because the daemon keeps anything. The "fall back to mirror" outcomes are plain HTTP errors — pkg's native mirror fallback does the rest, so pkg is never modified. Packages are identified by name-version strings; integrity comes solely from pkg's signed repository database, which supplies the expected hash and the expected size from the same row. Transport is plain HTTP over TCP with no NAT traversal (ADR-001); a peer that cannot accept inbound connections costs one timeout and a retry. The peer wire is specified in `peer-transfer-spec-v0.2.md` and is a different surface from the mirror facade, with its own `/pkg/name-version` namespace. **There is no fixed limit on package size:** the transfer is bounded by the exact expected size, which is a tighter anti-abuse bound than any constant and imposes no ceiling. **That size is a bound, not a verdict.** It is load-bearing as a bound — it is the only thing standing between the fetch path and a peer streaming unbounded bytes, and hostile peers are expected — but breaching it never blacklists; see 11c. Neither end holds a package in memory, so the largest package in the repository (2.83 GiB) transfers on a 1 GiB host. |  |  |
+|  | **Upstream fallback (ADR-003)** — entered from 6a, 7b and 9d |  |  |
+|  | 8f | Daemon issues a plain `GET` for the package to the configured upstream mirror |  |
+|  | 9f | Daemon streams the response body straight through to pkg as a `200`, with the exact `Content-Length` taken from `packages.pkgsize` in the same repository-database row as the hash. **It does not spool and does not withhold bytes.** Upstream is the terminal source, so there is no next source to abandon it for; integrity is pkg's, which re-verifies at step 10 against the same signed catalogue. Hash incrementally for diagnostics only. Nothing above the copy buffer is ever resident — a `[]byte` here is the same regression it is on the peer wire |  |
+|  | 10f | pkg re-verifies, writes the file to its own cache, and installs — indistinguishable from step 10 of the main flow. The cache watcher then announces it (step 11), so a proxied package joins the swarm exactly as a peer-fetched one does |  |
+|  | **Error State:** Upstream fetch also failed |  |  |
+|  | 9g | Upstream is unreachable, or answers non-`200`, before any byte has been written to pkg |  |
+|  | 10g | Daemon returns `502` to pkg. **This is terminal** — there is no next mirror, so pkg reports a failed install. It is the only case in which the daemon has genuinely nothing to serve, which is what makes it the condition worth alerting on |  |
+|  | 11g | If upstream dies *mid-body*, after the `200` is committed, pkg receives a short body against the promised `Content-Length`. That is exactly what pkg sees from a real mirror having a bad day, and it handles it routinely; it is not a new failure mode this design has to absorb |  |
+| **Assumptions/ Comments** | The daemon has no package store of its own; it buffers in a temporary directory (configurable, defaulting to the system temp directory) and needs write access only there. The buffer is per-request and ephemeral, and it exists **on the peer path only**: what it buys is the ability to abandon a bad peer and try another without pkg ever seeing a failure, since a `200` is committed the moment its first body byte is written. With `MAX_PEERS = 3` there is somewhere to go, so that is worth having. It is *not* what makes the bytes trustworthy — pkg re-verifies everything it is handed (step 10) against the same signed catalogue — which is why the upstream path streams instead of spooling: there is no next source, so withholding bytes buys nothing and would cost temp space sized to the largest package in the repository (2.83 GiB) on every miss. ~~The "fall back to mirror" outcomes are plain HTTP errors — pkg's native mirror fallback does the rest, so pkg is never modified.~~ **Superseded by ADR-003, and this was the load-bearing assumption of the whole design.** It was measured false: `man pkg-repository` promises that *mirrors* within one repository are "tried in the order listed until a download succeeds", but multiple *repositories* are only **searched** in `PRIORITY` order, and search is solve-time selection rather than fetch-time retry. jmj is configured as a repository, so it gets selection and not retry — a facade `404` fails `pkg install` outright even with a healthy second repository holding the package. pkg is still never modified; what changed is that the daemon must supply the fallback itself. Evidence: `docs/logs/claude-pkg-mirror-verification.md` §7.1. Packages are identified by name-version strings; integrity comes solely from pkg's signed repository database, which supplies the expected hash and the expected size from the same row. Transport is plain HTTP over TCP with no NAT traversal (ADR-001); a peer that cannot accept inbound connections costs one timeout and a retry. The peer wire is specified in `peer-transfer-spec-v0.2.md` and is a different surface from the mirror facade, with its own `/pkg/name-version` namespace. **There is no fixed limit on package size:** the transfer is bounded by the exact expected size, which is a tighter anti-abuse bound than any constant and imposes no ceiling. **That size is a bound, not a verdict.** It is load-bearing as a bound — it is the only thing standing between the fetch path and a peer streaming unbounded bytes, and hostile peers are expected — but breaching it never blacklists; see 11c. Neither end holds a package in memory, so the largest package in the repository (2.83 GiB) transfers on a 1 GiB host. |  |  |
  
 ---
  
@@ -160,7 +166,7 @@
  
 | UC-07 | Repository Metadata (pkg update) |  |  |
 | :---- | ----- | :---- | ----- |
-| **Description** | pkg also requests repository metadata (catalog, meta.conf) from its mirrors, most visibly during `pkg update`. The daemon does not serve, cache, or proxy metadata: it returns an HTTP error for any non-package-file path, and pkg fetches the metadata from its next mirror. The signed catalog is the root of the whole integrity model and must always come from a real mirror. |  |  |
+| **Description** | ⚠️ **THIS USE CASE IS BROKEN AS WRITTEN — do not implement from it. Owner ruling required.** pkg also requests repository metadata (catalog, meta.conf) from its mirrors, most visibly during `pkg update`. ~~The daemon does not serve, cache, or proxy metadata: it returns an HTTP error for any non-package-file path, and pkg fetches the metadata from its next mirror.~~ Step 4 below — "pkg falls through to its next mirror" — **does not happen**. It was measured (`docs/logs/claude-pkg-mirror-verification.md` §7.1): a facade error on a metadata path breaks `pkg update` outright, because fall-through exists between mirrors within a repository and not between repositories, and jmj is a repository. ADR-003 compounds this by making jmj pkg's *only* mirror, removing even a hypothetical second repository. So a daemon that errors on metadata cannot be used at all. The signed catalog is still the root of the whole integrity model and must still originate from a real mirror — but note that **relaying** upstream's bytes is not the same as vouching for them, since pkg verifies the repository signature itself, and the §7 harness did exactly that successfully (37,789 packages, `signature_type: fingerprints` intact). Whether the facade should therefore proxy metadata — which is what ADR-003's own `If-Modified-Since`/`304` consequence assumes — or do something else, is **not decided anywhere** and needs its own ADR. See `docs/mirror-facade-spec-v0.1.md` open question 7. |  |  |
 | **Actors** | Primary | pkg (triggered by the user's `pkg update`, or implicitly before other operations) |  |
 |  | Secondary | P2P Daemon, conventional mirror |  |
 | **Trigger** | pkg requests any non-package-file path from the daemon |  |  |
@@ -175,5 +181,4 @@
 | **Alternative Flow** | **Error State:** Next mirror also fails |  |  |
 |  | **Step** | **Action** |  |
 |  | 4a | pkg reports its ordinary repository error to the user; the daemon is not involved |  |
-| **Assumptions/ Comments** | The integration smoke test must confirm empirically that pkg's catalog fetch falls through mirrors cleanly — the drop-in design leans on this behaviour. The configuration mechanism that orders the mirrors (daemon first, real mirror second) is settled by the s
-ame smoke test. |  |  |
+| **Assumptions/ Comments** | ~~The integration smoke test must confirm empirically that pkg's catalog fetch falls through mirrors cleanly — the drop-in design leans on this behaviour. The configuration mechanism that orders the mirrors (daemon first, real mirror second) is settled by the same smoke test.~~ **That test has now been run, and both halves came back negative** (`docs/logs/claude-pkg-mirror-verification.md` §7.1). The catalog fetch does *not* fall through cleanly: it does not fall through at all. And there is no configuration mechanism that orders daemon-first, mirror-second — all three candidates were tried. `mirror_type: srv` needs control of DNS and cannot express a loopback daemon from `repos/*.conf`; `mirror_type: http` is the documented mechanism that fits exactly and **segfaults pkg 2.7.5** (a draft bug report exists); and two repositories with `priority` gives selection without fetch-time retry, which is the failure above. This use case was the one holding the empirical question, and the answer removed its own premise. |  |  |

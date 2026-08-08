@@ -110,6 +110,7 @@ is `405`.
 | Not held (e.g. `pkg clean` since the last announce) | `404` | try next peer |
 | Path is not `/pkg/<something>`, or the name-version fails validation | `400` | try next peer |
 | Method other than `GET` | `405` | try next peer |
+| Serving-side concurrency limit reached | `503` | try next peer |
 | Anything else, or the connection fails | — | try next peer |
 
 `200` responses carry `Content-Type: application/octet-stream` and an accurate
@@ -129,6 +130,12 @@ UC-06 §5b requires that a serving daemon which discovers it does not hold a
 requested package sends a **full re-announce** to the tracker: if one entry has
 drifted, others may have too. That obligation is unchanged by the transport and
 attaches to the `404` path here.
+
+It attaches to `404` **only**. A `503` must not trigger it: `404` means we have
+discovered we no longer hold something we advertised, whereas `503` means we do
+hold it and are refusing to serve it right now. Re-announcing on `503` would
+flood the tracker precisely when the daemon is already at its limit
+(`docs/adr/adr-002-serving-side-concurrency.md`).
 
 ## The size bound — what replaces `MaxPayload`
 
@@ -202,6 +209,18 @@ it is the only thing that makes a 2.83 GiB package transferable on a 1 GiB host.
 - Range requests are answered if the implementation provides them for free.
   The requester never sends one in v0.2; resumption is not in scope
   ("no additional features, just implement the use cases").
+- **Bound concurrency with two non-blocking semaphores — one global, one keyed
+  by remote IP — and reply `503` the moment either is full.** No queueing, no
+  waiting, no `Retry-After`: the requester has other holders to try and pkg's
+  own mirror behind those, so an immediate refusal is a fast fall-through where
+  a wait would be a stall. Remote identity is the host half of `r.RemoteAddr`
+  via `net.SplitHostPort` and is **never** read from a header — a cap keyed on
+  client-supplied input is a cap the attacker sets. Both limits default to `0`,
+  meaning unlimited, and both are configurable; the hostile-peer expectation
+  justifies the mechanism, but nobody has measured a number. Diagnostics must
+  name which cap fired and for which IP, because an attack and a misconfigured
+  ceiling look identical in a bare count and have opposite remedies. Rationale
+  and rejected alternatives: `docs/adr/adr-002-serving-side-concurrency.md`.
 
 ## Timeouts
 
@@ -279,11 +298,11 @@ error, including permanent ones, and hot-spins on a closed listener. Moving to
 
 | Item | Status |
 |---|---|
-| Concurrency limits on the serving side | Open. No cap on simultaneous seeds is specified. Related to, but not the same as, the forbidden bandwidth management. |
+| Concurrency limits on the serving side | ~~Open. No cap on simultaneous seeds is specified.~~ **Decided by `docs/adr/adr-002-serving-side-concurrency.md`:** a global cap *and* a per-remote-IP cap, both non-blocking, both defaulting to `0` = unlimited, `503` when either is full. Specified under *Serving side obligations* above. It is admission control, not the forbidden bandwidth management — it sets no rate, no throughput floor and no deadline, and an accepted transfer runs exactly as fast as it otherwise would. |
 | Resumption / `Range` on the requesting side | Out of scope for v0.2. The server may support it; the client does not use it. |
 | Whether `PackageHashes` and `RepositoryDatabase` merge | Open. They are two views of the same repository row and this spec relies on both being present together, which strengthens the case for merging. Not decided here. |
 | TLS, authentication, peer identity | None in v0.2. Consequences are availability-only and self-correcting, as with the tracker. |
-| `HEAD` on the mirror facade | Unchanged and still open (`mirror-facade-spec-v0.1.md` open question 1). Note that the exact-size fact used here would let the facade answer `HEAD` honestly, which was the original objection — but resolving it depends on the UC-07 smoke test, not on this wire. |
+| `HEAD` on the mirror facade | ~~Unchanged and still open.~~ **Answered by measurement** (`docs/logs/claude-pkg-mirror-verification.md` §7.3): pkg 2.7.5 issues only plain `GET` against a mirror — zero `HEAD`, zero `Range`, across a catalogue refresh, a `pkg fetch` and a real `pkg install`. See `mirror-facade-spec-v0.1.md` open question 1 for the scope limit on that result. |
 
 ## Definition of done
 
@@ -298,5 +317,5 @@ FreeBSD and no second machine:
 4. A body longer than the expected size is cut off and rejected.
 5. A `Content-Length` disagreeing with the expected size is rejected without
    reading the body.
-6. `404`, `400` and `405` each advance the requester to the next peer.
+6. `404`, `400`, `405` and `503` each advance the requester to the next peer.
 7. The fuzz target survives arbitrary request bytes without panicking.
