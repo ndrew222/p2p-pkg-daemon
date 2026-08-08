@@ -13,7 +13,10 @@ package daemon
 // contract.
 //
 // ---------------------------------------------------------------------------
-// BLOCKED (HANDOFF §5.7) — do not extend, tune, or partially migrate this file.
+// SUPERSEDED (HANDOFF §5.7) — this file awaits a rewrite, not an edit.
+//
+// No longer blocked: the two owner rulings it was waiting on have landed
+// (ADR-005, ADR-006). What follows still describes why it is wrong.
 //
 // It implements a model that has been measured false. On a peer miss it returns
 // an HTTP error, assuming pkg falls through to its next mirror. It does not:
@@ -31,12 +34,9 @@ package daemon
 // question -- it breaks `pkg update` outright (§7.1). The tests below that
 // assert the refusal encode the retired rule and go with it.
 //
-// The rework is now blocked on ONE owner ruling, in HANDOFF.md:
-//
-//	§4.5  how is the upstream mirror configured?  -> both the package-miss
-//	      path and the metadata path fetch from upstream, and neither has a
-//	      URL until this is settled. Tradeoffs:
-//	      docs/logs/claude-upstream-mirror-config.md
+// ADR-006 then settled where the upstream URL comes from: cfg.UpstreamURL,
+// required, no default, with ${ABI} already expanded by the time the daemon
+// starts. So the rework has everything it needs and is unblocked.
 //
 // Not blocked on, and not blocking, §5.3 (the peer wire) — different surface.
 //

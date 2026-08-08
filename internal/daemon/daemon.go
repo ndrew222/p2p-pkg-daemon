@@ -256,6 +256,15 @@ func (d *Daemon) Reload() error {
 	if err := config.Validate(newCfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
+	// SIGHUP goes through the same host-resolution step startup does, or a
+	// reloaded config could leave a literal ${ABI} in the upstream URL
+	// (ADR-006). Only runs pkg when the placeholder is actually present.
+	if err := config.ExpandUpstream(newCfg, config.PkgABI); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+	for _, w := range config.Warnings(newCfg) {
+		log.Printf("Warning: %s", w)
+	}
 
 	// Take the lock only once, and call the Locked helpers from under it.
 	// The previous version locked here and then called startHTTPServer,

@@ -59,14 +59,13 @@ Current branch: `main`; everything through `bc5fabf` is merged.
 ADR-001 through -005 are all Approved, and **§5.3 is the next work item and is
 fully unblocked.**
 
-**§4.4 is closed** — the owner ruled on 2026-08-08 that the facade proxies
-metadata, recorded as ADR-005, and UC-07 is rewritten around it. **One thing
-remains blocked on an owner decision: how the upstream mirror is configured
-(§4.5).** It is the last blocker on §5.7. A tradeoff analysis of the two
-candidate mechanisms — an explicit config key versus discovering the URL from
-pkg's own `/etc/pkg/FreeBSD.conf` — is in
-`docs/logs/claude-upstream-mirror-config.md`; it deliberately recommends
-without deciding.
+**§4.4 and §4.5 are both closed** (ADR-005 and ADR-006, ruled 2026-08-08).
+**Nothing is blocked on an owner decision.** §5.7 — the facade rework — is
+unblocked for the first time, and is now the largest open item alongside §5.3.
+
+Read before starting §5.7: ADR-003 (fetch semantics), ADR-004 (path rule),
+ADR-005 (metadata is proxied) and ADR-006 (`upstream_url`). The key exists,
+validates and expands; nothing consumes it yet.
 
 ## 1. Document map — what to trust
 
@@ -80,6 +79,7 @@ without deciding.
 | `docs/adr/adr-003-facade-fetch-semantics.md` | **Approved.** Facade proxies to upstream on a peer miss; peer path spools, upstream path streams; no facade cache. |
 | `docs/adr/adr-004-facade-path-rule.md` | **Approved.** Carries the `All/` + `Hashed/` + `~hash10` path rule out of the deprecated facade spec. Introduces no new decision; if it differs from that spec's text, the spec wins. |
 | `docs/adr/adr-005-metadata-proxying.md` | **Approved.** The facade proxies non-package paths to the configured upstream and relays the response, including `304`. Closes §4.4; retires *"never proxies metadata"*. |
+| `docs/adr/adr-006-upstream-mirror-config.md` | **Approved and implemented** (the key, not its consumer). `upstream_url` in jmj's config: required, no default, `${ABI}` expanded at startup, plaintext warned not refused. Closes §4.5. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
@@ -269,7 +269,36 @@ Flagged in place at `docs/mirror-facade-spec-v0.1.md` (open question 7 and a
 warning under *Request surface*) and at UC-07's description, so nobody
 implements either reading by accident.
 
-### 4.5 Which upstream mirror, and what the config key is called
+### 4.5 Which upstream mirror, and what the config key is called — **RULED** (ADR-006)
+
+**Closed 2026-08-08 by owner ruling, recorded in
+`docs/adr/adr-006-upstream-mirror-config.md` (Approved). This was the last
+blocker on §5.7, which is now fully unblocked.**
+
+The key is **`upstream_url`**, set in jmj's own config; discovery from pkg's
+config is *not* the source. It is **required and has no default**, because under
+ADR-005 it decides which repository pkg installs from — so `-generate-config`
+refuses to emit without `-upstream`, which is how UC-01's "defaults are valid by
+construction" survives a key that cannot be guessed. `${ABI}` is expanded at
+**startup only**, via `pkg config abi` (ruled permissible), and only when the
+placeholder is present, so a literal URL never shells out and the daemon still
+runs off FreeBSD. Plaintext `http` is **warned about, not refused** — unlike
+`facade_addr`, because tampering is still caught by pkg's signature check and
+jmj's hash check. The branch/ABI mismatch is **advisory**.
+
+**Implemented** in `internal/config` and `cmd/jmj` — see
+`docs/logs/claude-upstream-url-key.md`. **Two things are deliberately NOT done**
+and are the first things to know: the **advisory cross-check is unimplemented**,
+so nothing currently detects a silent branch mismatch; and **nothing consumes
+`upstream_url` yet**, because the facade is frozen — it is validated, expanded,
+and then unused until §5.7 lands.
+
+The original statement of the problem follows, retained because it records the
+reasoning and the measurements that fed the ruling.
+
+---
+
+#### Original blocker text (historical)
 
 ADR-003 requires a configured upstream and deliberately leaves the key name, the
 TLS decision and the choice of mirror open. **Blocks §5.7, and is now the only
@@ -414,7 +443,25 @@ call panics. Both wiring sites go through `Daemon.repository()` for this reason;
 
 ### 5.6 §4.1 cache-layout cross-check — **CLOSED** by §7.5.
 
-### 5.7 Facade rework under ADR-003 — **BLOCKED. Do not start.**
+### 5.7 Facade rework under ADR-003/005/006 — **UNBLOCKED as of 2026-08-08**
+
+> **The two rulings this section waited on have landed** — §4.4 as ADR-005
+> (the facade proxies metadata) and §4.5 as ADR-006 (`upstream_url`, required,
+> no default, `${ABI}` expanded at startup). The "do not start" below is
+> **lifted**; the description of *why the file is wrong* is still accurate and
+> is why it needs a rewrite rather than an edit.
+>
+> Scope, now fully specified: the upstream fetch path (streaming, no spool, no
+> `[]byte`), the metadata branch (relay from upstream, including `304`, instead
+> of today's `404`), the narrowed `404`/`502` semantics, `If-Modified-Since`
+> relay, safe joining of a client-supplied path onto the upstream base, and the
+> contract comment at the top of the file. The tests that encode the retired
+> contract go with it — `facade_test.go:91`, `:189`, `:354`, and
+> `daemon_test.go:187`, which uses a metadata path as its probe.
+>
+> `cfg.UpstreamURL` is ready to consume: populated, validated, expanded.
+
+#### Historical framing (kept — it explains why the file is wrong)
 
 **`internal/daemon/facade.go` implements a model that has been measured false
 and is not to be extended, tuned or partially migrated until the two rulings
@@ -432,7 +479,10 @@ fetch from a configured upstream mirror and stream the bytes through.
 | Blocker | Why it blocks this file |
 |---|---|
 | ~~§4.4 — does the facade proxy pkg's catalogue?~~ | **RULED — ADR-005: it proxies.** The non-package branch is now specified: fetch from upstream and relay. No longer a blocker. |
-| §4.5 — how the upstream mirror is configured | **The only remaining blocker.** Both the package-miss path and the metadata path fetch from upstream, and neither has a URL until this is settled. Tradeoff analysis: `docs/logs/claude-upstream-mirror-config.md`. |
+| ~~§4.5 — how the upstream mirror is configured~~ | **RULED — ADR-006, and implemented.** `cfg.UpstreamURL` is populated, validated and `${ABI}`-expanded by the time the daemon starts. No longer a blocker. |
+
+**Nothing blocks this file any more.** It is frozen only in the sense that it
+has not been rewritten yet — the rulings it was waiting on have all landed.
 
 **Not blocked on §5.3**, and §5.3 does not depend on this — they are different
 wires. §5.3 is the work to pick up.

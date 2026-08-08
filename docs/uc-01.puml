@@ -10,18 +10,18 @@ participant Tracker
 
 == Generation: no side effects, no privileges ==
 
-User -> Gen : jmj -generate-config [-tracker ...] [-facade-addr ...] [-serving-addr ...] [-temp-dir ...] [-cache ...] [-repo-db ...]
+User -> Gen : jmj -generate-config -upstream URL [-tracker ...] [-facade-addr ...] [-serving-addr ...] [-temp-dir ...] [-cache ...] [-repo-db ...]
 activate Gen
 
 Gen -> Gen : defaults + flags
 note right : Flags fully determine the output.\nThe existing config is NOT read as a\nmerge base: the usual invocation is\n"> config.json" and the shell truncates\na redirect target BEFORE jmj starts, so\nthat file is already empty by now.\nSee the note at the foot of this diagram.
 
 Gen -> Gen : validateFields()
-note right : Values only — port range, address\nformat, tracker URL, paths non-empty,\nand facade_addr is a loopback address.\nNo filesystem access at all, so a config\ncan be generated on one machine for\nanother
+note right : Values only — port range, address\nformat, tracker URL, paths non-empty,\nfacade_addr is a loopback address, and\nupstream_url is present and http/https.\nNo filesystem access at all AND no\ncommands run, so a config can be\ngenerated on one machine for another.\n\nA ${ABI} in upstream_url is left\nUNEXPANDED on purpose: resolving it\nneeds the target host, which generation\nnever touches. The placeholder travels\nin the file (ADR-006).
 
-alt invalid setting value
-Gen --> User : stderr: "Invalid setting: <field>", exit 1
-note right : Nothing on stdout, so a redirect\nleaves an empty file rather than\na corrupt config
+alt invalid or missing setting value
+Gen --> User : stderr naming the field, exit 1
+note right : Nothing on stdout, so a redirect\nleaves an empty file rather than\na corrupt config.\n\nA MISSING -upstream lands here too.\nThat is what keeps "defaults are valid\nby construction" true for a key with no\ndefault: rather than guessing a mirror,\nthe generator declines to emit at all,\nso everything it does emit is startable.\nGuessing would silently choose which\nrepository pkg installs from (ADR-005).
 
 else fields valid
 Gen --> Shell : stdout: complete config JSON
@@ -62,6 +62,9 @@ deactivate Config
 
 Daemon -> Daemon : validate() against this machine
 note right : temp_dir created if absent and\nprobed for writability (daemon-owned).\ncache_dir and repo_db_dir must ALREADY\nexist and are never created — the pkg\ncache and its repository catalogues are\nread-only to the daemon
+
+Daemon -> Daemon : expand ${ABI} in upstream_url
+note right : The one host-specific resolution, and\nthe daemon's ONE execution of an external\nbinary: "pkg config abi" (ADR-006).\nRun ONLY when the placeholder is actually\npresent, so a literal URL shells out to\nnothing and the daemon stays exercisable\non a non-FreeBSD box. A placeholder that\ncannot be resolved is fatal — proxying\nwith an unexpanded ${ABI} in the path is\nthe bad outcome.\n\nSIGHUP reload runs this too, or a\nreloaded config could keep the literal.
 
 alt environment invalid
 Daemon --> User : error naming the offending path; refuse to start
