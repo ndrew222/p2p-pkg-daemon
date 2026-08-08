@@ -1,6 +1,6 @@
 # ADR-003: Facade fetch semantics — proxy with fallback, and where verification happens
 
-**Status:** Proposed (drafted 2026-08-08 from the §7 measurements; awaiting vetting by Andrew and Elroy)
+**Status:** Approved by Andrew (drafted 2026-08-08 from the §7 measurements)
 
 Supersedes the "every failure becomes an HTTP error, which makes pkg fall through to its next configured mirror" assumption in `docs/use-case-descriptions.md` UC-02, and the status-code table in `docs/mirror-facade-spec-v0.1.md` that encodes it. Evidence: `docs/logs/claude-pkg-mirror-verification.md`.
 
