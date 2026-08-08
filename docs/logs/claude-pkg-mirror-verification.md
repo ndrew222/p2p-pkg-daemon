@@ -139,16 +139,26 @@ track upstream modification times, and a facade that ignores the header and
 always replies `200` merely wastes bandwidth, while one that replies `304`
 wrongly would serve pkg a stale catalogue. Worth a spec question of its own.
 
-**Not real: the pkg segfault.** The run ended with pkg dumping core
-(`/root/pkg.core`, 13 MB) during "Processing entries", and that looked like a
-pkg defect. It is almost certainly **a bug in this probe**, now fixed. urllib
-raises a 304 as an `HTTPError`, so the 304 above fell into the generic error
-branch, which replied `304` *with* a body and a `Content-Length`. A 304 must
-not carry a body; sending one desynchronises the connection and the client
-reads the body as the head of the next response. Feeding that to a catalogue
-parser is a fully sufficient explanation for the crash, and it is our fault,
-not pkg's. **Do not record a pkg segfault as a finding on this evidence.**
-Re-run with the fix before claiming anything about pkg's robustness.
+**A real probe bug, which turned out not to be the segfault's cause.** This run
+also ended with pkg dumping core (`/root/pkg.core`, 13 MB) during "Processing
+entries". The first reading — recorded here because the reasoning is worth
+keeping — blamed the probe: urllib raises a 304 as an `HTTPError`, so the 304
+above fell into the generic error branch, which replied `304` *with* a body and
+a `Content-Length`. A 304 must not carry a body (RFC 9110 §15.4.5); sending one
+desynchronises the connection and the client reads the body as the head of the
+next response. That is a genuine defect, it is fixed in the script below, and
+it would have been a sufficient explanation.
+
+**It was not the explanation.** See §7.2 in Results: the crash reproduces with
+a mirror list naming *only* the real upstream mirror, where the probe serves
+one short text document and nothing else and the 304 path is never reached.
+That control isolates this bug out. The segfault is pkg 2.7.5's, not ours.
+
+Kept rather than deleted because the lesson generalises: a plausible
+self-attributed cause is not a control, and "our harness is probably at fault"
+is as much a claim needing evidence as "the system under test is at fault".
+`AGENTS.md`'s last trap — do not claim a fact about a system you have not
+inspected — cuts both ways.
 
 **Design flaw in that run's config.** It disabled both stock repositories:
 
@@ -364,6 +374,75 @@ Per AGENTS.md ground rule 2, these were raised rather than resolved:
    and nothing says whether an ADR outranks a use case or the reverse.
    **Raised; unanswered. Not invented around** — I added `docs/adr/` to the
    handoff's document map as *existing* without asserting a precedence rank.
+
+## How to demo it
+
+Reproduces both halves in about five minutes: the facade model *working*, then
+§7.1 *failing*. Run from a checkout with the script below saved as `probe.py`.
+`$H` is the FreeBSD host.
+
+**Use mechanism (3), not (2).** Mechanism (3) adds a repository under a new
+name and leaves the stock ones enabled, so the host keeps a working package
+manager throughout and the demo is interruptible at any step. Mechanism (2)
+shadows `FreeBSD-ports` *and* segfaults pkg 2.7.5 — it is the finding, not the
+demo.
+
+**This installs software on the host.** Steps 4 and 6 are real installs. The
+teardown removes them.
+
+```sh
+H=root@45.76.163.52
+
+# 1. Ship the probe and start it in proxy mode (a faithful mirror).
+ssh $H 'mkdir -p /root/jmjprobe && echo proxy > /root/jmjprobe/mode'
+ssh $H 'cat > /root/probe.py' < probe.py
+ssh $H '(nohup python3 /root/probe.py >/root/jmjprobe/server.log 2>&1 &); sleep 2; cat /root/jmjprobe/server.log'
+
+# 2. Add the probe as a higher-priority repository. Stock repos stay enabled.
+ssh $H 'mkdir -p /usr/local/etc/pkg/repos && cat > /usr/local/etc/pkg/repos/jmjprobe.conf' <<'EOF'
+jmjprobe: {
+  url: "http://127.0.0.1:8081",
+  mirror_type: "none",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  priority: 100,
+  enabled: yes
+}
+EOF
+
+# 3. THE FACADE MODEL WORKS. pkg accepts the proxy as a genuine signed
+#    repository. Expect ~37,789 packages processed, signatures intact.
+ssh $H 'pkg update -f'
+
+# 4. Control: with mode=proxy an install through the facade succeeds, exit 0.
+ssh $H 'pkg install -y -r jmjprobe indexinfo && echo "CONTROL: exit $?"'
+
+# 5. THE FINDING. Flip to 404 and try a package that is not cached.
+#    pkg does NOT fall through to FreeBSD-ports, which holds it and is healthy.
+ssh $H 'echo 404 > /root/jmjprobe/mode'
+ssh $H 'pkg clean -ay >/dev/null 2>&1; pkg install -y -r jmjprobe gettext-runtime; echo "RESULT: exit $?"'
+
+# 6. Same shape for corrupt bytes: caught as a checksum failure, still no
+#    fallback. (503 and connection-refused behave identically.)
+ssh $H 'echo badbytes > /root/jmjprobe/mode'
+ssh $H 'pkg clean -ay >/dev/null 2>&1; pkg install -y -r jmjprobe gettext-runtime; echo "RESULT: exit $?"'
+
+# 7. What pkg actually asked for, in order, with headers.
+ssh $H 'cat /root/jmjprobe/requests.jsonl' | python3 -m json.tool --json-lines
+
+# 8. Teardown. Restores the stock-only baseline.
+ssh $H 'pkg delete -y indexinfo gettext-runtime 2>/dev/null; rm -rf /usr/local/etc/pkg/repos /root/jmjprobe /root/probe.py /var/db/pkg/repos/jmjprobe; pkg update -f' 
+```
+
+Step 3 succeeding and step 5 failing is the whole result: the same repository,
+the same config, the same pkg — the *only* difference is whether the facade
+answered `200` or `404`, and a `404` ends the install rather than redirecting
+it. Swap step 5's `echo 404` for `echo 503`, or kill the probe entirely to get
+connection-refused, and the outcome is the same exit 1.
+
+Pick step 5's package to be one that is genuinely absent — `pkg clean -ay`
+empties the cache, but an already-*installed* package makes pkg a no-op and the
+demo silently proves nothing. Verify with `pkg info gettext-runtime` first.
 
 ## The probe script
 
