@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ func validConfig(t *testing.T) *DaemonConfig {
 		TempDir:     filepath.Join(t.TempDir(), "scratch"),
 		CacheDir:    t.TempDir(),
 		RepoDBDir:   t.TempDir(),
+		UpstreamURL: "https://pkg.example.org/FreeBSD:15:amd64/quarterly",
 	}
 }
 
@@ -196,7 +198,7 @@ func TestValidateRejectsRepoDBDirThatIsNotADirectory(t *testing.T) {
 // cache_dir is a FreeBSD path, so requiring it to exist here would break the
 // generator on every machine anyone develops on.
 func TestValidateFieldsIgnoresTheFilesystem(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := defaultsWithUpstream()
 	cfg.TempDir = filepath.Join(t.TempDir(), "not-created-either")
 
 	if err := ValidateFields(cfg); err != nil {
@@ -241,11 +243,42 @@ func TestDefaultConfigTempDir(t *testing.T) {
 	}
 }
 
+// defaultsWithUpstream is the defaults plus the one key that has none.
+//
+// upstream_url is required and deliberately undefaulted (ADR-006), so
+// DefaultConfig() alone no longer validates -- see
+// TestDefaultConfigIsRefusedWithoutAnUpstream, which asserts exactly that.
+// Every other test wants "a valid config", which is this.
+func defaultsWithUpstream() *DaemonConfig {
+	cfg := DefaultConfig()
+	cfg.UpstreamURL = "https://pkg.example.org/FreeBSD:15:amd64/quarterly"
+	return cfg
+}
+
 // The default facade address must itself satisfy the loopback rule, or the
 // daemon refuses to start out of the box.
+//
+// Rephrased for ADR-006: "the defaults are valid by construction" now means
+// the defaults plus the one required key, because the generator refuses to
+// emit a config without it rather than guessing a value.
 func TestDefaultConfigPassesFieldValidation(t *testing.T) {
-	if err := ValidateFields(DefaultConfig()); err != nil {
-		t.Errorf("ValidateFields(DefaultConfig()) = %v, want nil", err)
+	if err := ValidateFields(defaultsWithUpstream()); err != nil {
+		t.Errorf("ValidateFields(defaults + upstream) = %v, want nil", err)
+	}
+}
+
+// The other half of the invariant above, and the reason -generate-config
+// aborts rather than emitting a config that cannot start (ADR-006). The error
+// must name the key: a config silently defaulted to some mirror would choose a
+// repository on the operator's behalf, and a wrong branch does not error --
+// pkg populates its database from whatever is proxied and every hash matches.
+func TestDefaultConfigIsRefusedWithoutAnUpstream(t *testing.T) {
+	err := ValidateFields(DefaultConfig())
+	if err == nil {
+		t.Fatal("ValidateFields(DefaultConfig()) = nil, want an error naming upstream_url")
+	}
+	if !strings.Contains(err.Error(), "upstream_url") {
+		t.Errorf("error %q does not name upstream_url", err)
 	}
 }
 
@@ -408,4 +441,128 @@ func TestLoadMovesCorruptConfigAside(t *testing.T) {
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Errorf("corrupt config was not preserved as .bak: %v", err)
 	}
+}
+
+// --- upstream_url (ADR-006) ---------------------------------------------
+
+var errNoABI = errors.New("no pkg on this host")
+
+func TestValidateFieldsUpstreamURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+		// naming is a substring the error must carry, so a rejection is
+		// actionable rather than merely correct.
+		naming string
+	}{
+		{name: "https", url: "https://pkg.FreeBSD.org/FreeBSD:15:amd64/quarterly"},
+		{name: "plaintext http is allowed, not refused", url: "http://mirror.lan/x"},
+		{
+			name: "the ${ABI} placeholder survives field validation",
+			url:  "https://pkg.FreeBSD.org/${ABI}/quarterly",
+		},
+		{name: "empty", url: "", wantErr: true, naming: "upstream_url"},
+		{
+			// The obvious paste from /etc/pkg/FreeBSD.conf. Named, not
+			// silently stripped -- same principle as legacyKeys.
+			name:    "pkg+https is rejected with the fix in the message",
+			url:     "pkg+https://pkg.FreeBSD.org/${ABI}/quarterly",
+			wantErr: true,
+			naming:  "pkg+",
+		},
+		{name: "ftp", url: "ftp://mirror.example/x", wantErr: true, naming: "http"},
+		{name: "no scheme", url: "pkg.FreeBSD.org/quarterly", wantErr: true},
+		{name: "no host", url: "https:///quarterly", wantErr: true, naming: "host"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig(t)
+			cfg.UpstreamURL = tc.url
+			err := ValidateFields(cfg)
+			if tc.wantErr && err == nil {
+				t.Fatalf("ValidateFields() with upstream_url %q = nil, want an error", tc.url)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidateFields() with upstream_url %q = %v, want nil", tc.url, err)
+			}
+			if tc.naming != "" && !strings.Contains(err.Error(), tc.naming) {
+				t.Errorf("error %q does not mention %q", err, tc.naming)
+			}
+		})
+	}
+}
+
+// Plaintext is permitted but must not pass silently. The asymmetry with
+// facade_addr -- which IS refused -- is deliberate: a non-loopback facade is an
+// open relay, whereas tampering with a plaintext upstream is still caught by
+// pkg's signature check and jmj's hash check.
+func TestWarningsFlagsPlaintextUpstream(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.UpstreamURL = "http://mirror.lan/x"
+	got := Warnings(cfg)
+	if len(got) != 1 || !strings.Contains(got[0], "https") {
+		t.Errorf("Warnings() = %v, want one warning suggesting https", got)
+	}
+
+	cfg.UpstreamURL = "https://mirror.lan/x"
+	if got := Warnings(cfg); len(got) != 0 {
+		t.Errorf("Warnings() on an https upstream = %v, want none", got)
+	}
+}
+
+func TestExpandUpstream(t *testing.T) {
+	// called records whether the ABI lookup ran at all. Whether it runs is
+	// as much a part of the contract as the result: a literal URL must never
+	// shell out, or the daemon stops working on a non-FreeBSD box.
+	newABI := func(v string, err error, called *bool) ABIFunc {
+		return func() (string, error) { *called = true; return v, err }
+	}
+
+	t.Run("expands the placeholder", func(t *testing.T) {
+		var called bool
+		cfg := &DaemonConfig{UpstreamURL: "https://pkg.FreeBSD.org/${ABI}/quarterly"}
+		if err := ExpandUpstream(cfg, newABI("FreeBSD:15:amd64", nil, &called)); err != nil {
+			t.Fatalf("ExpandUpstream() = %v, want nil", err)
+		}
+		want := "https://pkg.FreeBSD.org/FreeBSD:15:amd64/quarterly"
+		if cfg.UpstreamURL != want {
+			t.Errorf("upstream_url = %q, want %q", cfg.UpstreamURL, want)
+		}
+		if !called {
+			t.Error("the ABI lookup was not called for a URL carrying ${ABI}")
+		}
+	})
+
+	t.Run("a literal URL never runs pkg", func(t *testing.T) {
+		var called bool
+		cfg := &DaemonConfig{UpstreamURL: "https://pkg.FreeBSD.org/FreeBSD:15:amd64/quarterly"}
+		if err := ExpandUpstream(cfg, newABI("", errNoABI, &called)); err != nil {
+			t.Fatalf("ExpandUpstream() = %v, want nil", err)
+		}
+		if called {
+			t.Error("the ABI lookup ran for a URL with no placeholder; a literal URL must not shell out")
+		}
+	})
+
+	t.Run("an unresolvable ABI is fatal", func(t *testing.T) {
+		var called bool
+		cfg := &DaemonConfig{UpstreamURL: "https://pkg.FreeBSD.org/${ABI}/quarterly"}
+		err := ExpandUpstream(cfg, newABI("", errNoABI, &called))
+		if err == nil {
+			t.Fatal("ExpandUpstream() = nil, want an error; proxying with an unexpanded placeholder is the bad outcome")
+		}
+		if !strings.Contains(err.Error(), "upstream_url") {
+			t.Errorf("error %q does not name the field", err)
+		}
+	})
+
+	t.Run("a variable we do not expand is refused", func(t *testing.T) {
+		var called bool
+		cfg := &DaemonConfig{UpstreamURL: "https://pkg.FreeBSD.org/${OSNAME}/quarterly"}
+		if err := ExpandUpstream(cfg, newABI("FreeBSD:15:amd64", nil, &called)); err == nil {
+			t.Error("ExpandUpstream() with an unknown placeholder = nil, want an error rather than a URL with ${...} in the path")
+		}
+	})
 }

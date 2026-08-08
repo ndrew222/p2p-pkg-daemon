@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -46,8 +47,11 @@ type repoRow struct {
 type Repositories struct {
 	dir string
 
-	mu   sync.RWMutex
-	rows map[string]repoRow
+	mu sync.RWMutex
+	// rows is the package index; sources maps each catalogue's path to the
+	// upstream URL pkg recorded for it. Both are swapped together by Reload.
+	rows    map[string]repoRow
+	sources map[string]string
 }
 
 // OpenRepositories loads every repository database under dir, which is
@@ -83,11 +87,18 @@ func (r *Repositories) Reload() error {
 	}
 
 	rows := make(map[string]repoRow)
+	sources := make(map[string]string)
 	var collisions []string
 	for _, path := range paths {
 		loaded, skipped, err := loadRepositoryDatabase(path)
 		if err != nil {
 			return fmt.Errorf("daemon: %s: %w", path, err)
+		}
+		// Advisory only, so a failure here is swallowed by design: the
+		// source URL powers a warning and nothing else. See
+		// upstreamcheck.go.
+		if src, err := loadRepositorySource(path); err == nil && src != "" {
+			sources[path] = src
 		}
 		// A row the daemon cannot trust is worse than useless: the fetch
 		// path would compare peer bytes against it, never match, and
@@ -147,8 +158,52 @@ func (r *Repositories) Reload() error {
 
 	r.mu.Lock()
 	r.rows = rows
+	r.sources = sources
 	r.mu.Unlock()
 	return nil
+}
+
+// Sources maps each catalogue's path to the upstream URL pkg recorded for it,
+// as measured on the reference host:
+//
+//	repodata: packagesite | pkg+https://pkg.FreeBSD.org/FreeBSD:15:amd64/quarterly
+//
+// Note the value is ALREADY EXPANDED -- pkg stores the resolved ABI, not
+// ${ABI} -- which is what makes it usable for a direct comparison.
+//
+// Catalogues whose source could not be read are simply absent; this feeds a
+// warning and must never be load-bearing.
+func (r *Repositories) Sources() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]string, len(r.sources))
+	for k, v := range r.sources {
+		out[k] = v
+	}
+	return out
+}
+
+// loadRepositorySource reads the upstream URL pkg recorded for a catalogue.
+//
+// Separate from loadRepositoryDatabase because it is advisory and its failures
+// are not: a catalogue with no repodata table, or no packagesite row, is not a
+// broken catalogue. Returns "" rather than an error in that case.
+func loadRepositorySource(path string) (string, error) {
+	db, err := sql.Open("sqlite", readOnlyDSN(path))
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	var url string
+	err = db.QueryRow(`SELECT value FROM repodata WHERE key = 'packagesite'`).Scan(&url)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return url, nil
 }
 
 // ExpectedHash implements PackageHashes: packages.cksum, the lowercase hex

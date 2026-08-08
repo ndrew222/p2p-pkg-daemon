@@ -56,13 +56,20 @@ commit as the work.
 
 Current branch: `main`; everything through `bc5fabf` is merged.
 
-ADR-001, -002 and -003 are all Approved, and **§5.3 is the next work item and is
+ADR-001 through -007 are all Approved, and **§5.3 is the next work item and is
 fully unblocked.**
 
-**One thing is blocked on an owner decision: whether the facade proxies pkg's
-metadata.** It surfaced while bringing the specs into line with ADR-003 and it
-is not a detail — UC-07 is built end to end on a fall-through that does not
-exist, so as written it cannot be implemented at all. See §4.4.
+**§4.4, §4.5 and §4.6 are all closed** (ADR-005, ADR-006 and ADR-007, ruled
+2026-08-08). **No work is blocked and no question is open for the owner.** §5.7
+— the facade rework — is unblocked for the first time, and is now the largest
+open item alongside §5.3.
+
+Read before starting §5.7: ADR-003 (fetch semantics), ADR-004 (path rule),
+ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj fronts
+one repository and coexists with the rest). The key exists, validates and
+expands; nothing consumes it yet. ADR-007 carries one trap into the rework: a
+successful repository-database lookup is **not** proof the upstream can serve
+that package.
 
 ## 1. Document map — what to trust
 
@@ -75,9 +82,13 @@ exist, so as written it cannot be implemented at all. See §4.4.
 | `docs/adr/adr-002-serving-side-concurrency.md` | **Approved.** Global *and* per-remote-IP semaphores, `503` when either is full, default `0` = unlimited. Implement with §5.3. |
 | `docs/adr/adr-003-facade-fetch-semantics.md` | **Approved.** Facade proxies to upstream on a peer miss; peer path spools, upstream path streams; no facade cache. |
 | `docs/adr/adr-004-facade-path-rule.md` | **Approved.** Carries the `All/` + `Hashed/` + `~hash10` path rule out of the deprecated facade spec. Introduces no new decision; if it differs from that spec's text, the spec wins. |
+| `docs/adr/adr-005-metadata-proxying.md` | **Approved.** The facade proxies non-package paths to the configured upstream and relays the response, including `304`. Closes §4.4; retires *"never proxies metadata"*. |
+| `docs/adr/adr-006-upstream-mirror-config.md` | **Approved and implemented** (the key, not its consumer). `upstream_url` in jmj's config: required, no default, `${ABI}` expanded at startup, plaintext warned not refused. Closes §4.5. |
+| `docs/adr/adr-007-repository-topology.md` | **Approved.** jmj fronts one repository, replaces that one, coexists with every other enabled repository. `upstream_url` stays singular. Closes §4.6; corrects a misreading of ADR-003 in §4.6 and ADR-006. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
+| `docs/uc-07.puml` | Current, **not implemented**. New — UC-07 had no diagram before ADR-005. Carries the relay flow, the 304 branch and the terminal `502`. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
 | `docs/uc-06.puml` | Current as of the HTTP peer wire. |
 
@@ -192,7 +203,31 @@ because other documents cite them — §4.1 from `claude-config-schema.md` and
 `internal/daemon/facade.go:59` and `internal/daemon/repository.go:19`. **Do not
 reuse §4.1–§4.3 for new items.** New blockers take fresh numbers from §4.4.
 
-### 4.4 Does the facade proxy pkg's metadata? — **NEEDS AN OWNER RULING**
+### 4.4 Does the facade proxy pkg's metadata? — **RULED. Yes.** (ADR-005)
+
+**Closed 2026-08-08 by owner ruling, recorded in
+`docs/adr/adr-005-metadata-proxying.md` (Approved).** The facade fetches
+non-package paths from the configured upstream mirror and relays them —
+streamed, uncached, unverified, unmodified, with `If-Modified-Since`/`304`
+relayed unchanged. The sentence that gave way is *"the daemon never serves,
+caches or proxies metadata"*; *"the signed catalog comes from a real mirror"*
+survives, because relaying is not vouching and pkg verifies the signature
+itself.
+
+Propagated to UC-07 (rewritten — steps 3–5 and a new upstream-failure flow),
+`AGENTS.md`, and the deprecated facade spec's four flags. **§5.7 is now blocked
+on §4.5 alone.** Note two consequences worth carrying into the rework: the
+facade becomes a general reverse proxy for non-package paths, so the loopback
+enforcement on `facade_addr` is load-bearing and must not be relaxed; and a
+proxied path is client-supplied, so joining it to the upstream base URL must
+not permit escaping that base.
+
+The original statement of the problem follows, retained because it records why
+the rule changed.
+
+---
+
+#### Original blocker text (historical)
 
 **"Metadata" here means the repository catalogue files, not any hash.** Concretely
 the non-package paths in the facade's own list: `meta.conf`, `packagesite.pkg`,
@@ -239,11 +274,77 @@ Flagged in place at `docs/mirror-facade-spec-v0.1.md` (open question 7 and a
 warning under *Request surface*) and at UC-07's description, so nobody
 implements either reading by accident.
 
-### 4.5 Which upstream mirror, and what the config key is called
+### 4.5 Which upstream mirror, and what the config key is called — **RULED** (ADR-006)
+
+**Closed 2026-08-08 by owner ruling, recorded in
+`docs/adr/adr-006-upstream-mirror-config.md` (Approved). This was the last
+blocker on §5.7, which is now fully unblocked.**
+
+The key is **`upstream_url`**, set in jmj's own config; discovery from pkg's
+config is *not* the source. It is **required and has no default**, because under
+ADR-005 it decides which repository pkg installs from — so `-generate-config`
+refuses to emit without `-upstream`, which is how UC-01's "defaults are valid by
+construction" survives a key that cannot be guessed. `${ABI}` is expanded at
+**startup only**, via `pkg config abi` (ruled permissible), and only when the
+placeholder is present, so a literal URL never shells out and the daemon still
+runs off FreeBSD. Plaintext `http` is **warned about, not refused** — unlike
+`facade_addr`, because tampering is still caught by pkg's signature check and
+jmj's hash check. The branch/ABI mismatch is **advisory**.
+
+**Implemented** in `internal/config` and `cmd/jmj` — see
+`docs/logs/claude-upstream-url-key.md`. **The advisory cross-check is now
+implemented too** (`internal/daemon/upstreamcheck.go`), against a better source
+than this section originally anticipated: the repository database's `repodata`
+table records the upstream URL already expanded, so no UCL parsing is needed.
+Verified against the reference host.
+
+**One thing is deliberately still NOT done:** nothing consumes `upstream_url`
+yet, because the facade is frozen — it is validated, expanded, cross-checked,
+and then unused until §5.7 lands.
+
+The original statement of the problem follows, retained because it records the
+reasoning and the measurements that fed the ruling.
+
+---
+
+#### Original blocker text (historical)
 
 ADR-003 requires a configured upstream and deliberately leaves the key name, the
-TLS decision and the choice of mirror open. **Blocks §5.7.** Do not invent a key
-name — `AGENTS.md` ground rule 3.
+TLS decision and the choice of mirror open. **Blocks §5.7, and is now the only
+thing that does.** Do not invent a key name — `AGENTS.md` ground rule 3.
+
+**Tradeoff analysis: `docs/logs/claude-upstream-mirror-config.md`** (written
+2026-08-08 at the owner's request; recommends without deciding). It compares an
+explicit key, discovery from pkg's config, and the hybrid below, and recommends
+an explicit required key plus a *best-effort advisory* cross-check against pkg's
+config — so that the fragile parsing only ever powers a warning.
+
+**Partially ruled by the owner, 2026-08-08 — four sub-decisions still open.**
+
+Settled:
+
+| Question | Ruling |
+|---|---|
+| Where does the upstream URL come from? | **jmj's own config** — option A. Discovery from pkg's config is *not* the source. |
+| Is the silent branch/ABI mismatch a hard check? | **No — advisory.** Warn; do not refuse to start. |
+| May the daemon execute `pkg config abi`? | **Yes, permissible.** Settles the constraint question the analysis raised; executing pkg is not "wrapping" it. |
+| Must the advisory cross-check parse UCL? | **No.** The owner notes the file is greppable, and grep plus `pkg config abi` is acceptable for an advisory check. |
+
+Still open — **these block §5.7 and must not be invented** (ground rule 3): the
+**key name**; the **default value**, which is forced to exist by UC-01's
+"defaults are valid by construction" and therefore forces a choice of mirror
+*and* branch; whether the daemon **expands `${ABI}`** (and any other pkg URL
+variables) inside the key; and whether a **plaintext upstream** is refused or
+merely warned about. See the questions raised with the owner on 2026-08-08.
+
+**ADR-005 widened what this setting is.** The facade now proxies the catalogue,
+so the upstream URL no longer names a fallback source: it names **the repository
+pkg actually gets**. pkg's config points the jmj repo at loopback and says
+nothing about which real repository that is. A wrong upstream therefore does not
+error — pkg fetches the catalogue through jmj from the wrong branch, populates
+its database from it, and every hash matches, because the system is
+self-consistent and both branches carry the same signature. Whatever is ruled
+should say what detects that, if anything.
 
 **Correction: SRV is not a problem, and an earlier draft of this section said it
 was.** The claim was that the daemon must resolve SRV itself or be pointed at a
@@ -275,6 +376,16 @@ happy path. The URL already exists on the machine, in `/etc/pkg/FreeBSD.conf`:
 FreeBSD: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/quarterly", ... }
 ```
 
+> **Correction, measured 2026-08-08.** The block is named **`FreeBSD-ports`**,
+> not `FreeBSD`, and the file holds **three** blocks — `FreeBSD-ports` and
+> `FreeBSD-ports-kmods` enabled, `FreeBSD-base` disabled. The kmods and base
+> URLs also carry `${VERSION_MINOR}`. The file's own header comment tells
+> operators to disable a repository with a shadow file setting `enabled: no`
+> rather than by editing or deleting this one, so the documented disable path
+> **preserves** the URL. Superseded in practice: ADR-006 takes the comparison
+> URL from the repository database's `repodata` table instead, already
+> expanded, so none of this needs parsing.
+
 Reading it is consistent with the constraints — it is read-only, and the daemon
 already reads pkg's repository database. Three wrinkles the ruling should
 address:
@@ -292,6 +403,56 @@ address:
 A reasonable shape, if the owner wants one: an optional explicit key that
 overrides, defaulting to discovery, and a hard startup failure when neither
 yields a URL. **Not decided — recorded as a candidate, not a design.**
+
+**The analysis argues against exactly that shape** (`claude-upstream-mirror-config.md`,
+option C): it pays the whole cost of discovery — a UCL parser, pkg's multi-file
+shadowing semantics, `${ABI}` expansion, none of it testable in the gate — to
+make optional a path an explicit key already covers, and it leaves "why is jmj
+proxying from *there*?" with two possible answers instead of one. Also recorded
+there: a fourth wrinkle beyond the three above — deleting the stock block, which
+is the natural way to disable a repository, leaves discovery nothing to find,
+so discovery couples jmj to *how* the operator disables the stock repo.
+
+### 4.6 jmj has one upstream; a stock host has several repositories — **CLOSED (ADR-007)**
+
+Raised 2026-08-08 while implementing ADR-006's cross-check; ruled the same day.
+Open for one working session. **It rested on an error, which was mine.**
+
+The question as raised assumed *"ADR-003 requires jmj to be pkg's only enabled
+repository"*, and concluded that adopting jmj silently drops the others.
+**ADR-003 says no such thing.** It says jmj becomes pkg's only *mirror* rather
+than its first — and mirrors-versus-repositories is precisely the distinction
+ADR-003's Context section exists to draw. Collapsing the two words invented a
+constraint and then spent an open question on it.
+
+**ADR-007 rules: jmj fronts one repository, replaces that one, and coexists with
+the rest.** Other enabled repositories are left exactly as they are and continue
+to fetch directly. `upstream_url` stays a single URL, which is now the accurate
+expression of the model rather than a limitation of it.
+
+Coexistence needs no cross-repository fall-through, which is the mechanism
+ADR-003 measured as absent. Because the facade proxies upstream on a peer miss,
+jmj never `404`s for anything in its own catalogue, so there is no failure for a
+second repository to absorb. What multi-repository operation actually uses is
+**solve-time selection**, which ADR-003 affirms in the same breath as it denies
+retry.
+
+Two measurements worth keeping (full set in
+`docs/logs/claude-multi-repository.md`):
+
+- **`FreeBSD-ports` and `FreeBSD-ports-kmods` share 238 of 239 package names**,
+  differing only in version. The intuition that they are disjoint is false.
+  Exactly one package is kmods-exclusive: `drm-latest-kmod`.
+- **They share zero name-*versions*.** That is the figure that matters, because
+  name-version is what ADR-004's path rule keys on — so jmj holding both
+  catalogues under `repo_db_dir` creates no ambiguity in the identifier the
+  facade actually uses.
+
+**Carried into §5.7:** jmj's repository-database view is *broader* than its
+upstream. `Repositories` will return a hash for a package belonging to a
+repository jmj does not front, which its `upstream_url` cannot serve. That path
+is unreachable under ADR-007 — pkg never asks — but a successful hash lookup is
+**not** proof the upstream will answer, and the rework must not assume it is.
 
 ## 5. Work, in order
 
@@ -342,7 +503,25 @@ call panics. Both wiring sites go through `Daemon.repository()` for this reason;
 
 ### 5.6 §4.1 cache-layout cross-check — **CLOSED** by §7.5.
 
-### 5.7 Facade rework under ADR-003 — **BLOCKED. Do not start.**
+### 5.7 Facade rework under ADR-003/005/006 — **UNBLOCKED as of 2026-08-08**
+
+> **The two rulings this section waited on have landed** — §4.4 as ADR-005
+> (the facade proxies metadata) and §4.5 as ADR-006 (`upstream_url`, required,
+> no default, `${ABI}` expanded at startup). The "do not start" below is
+> **lifted**; the description of *why the file is wrong* is still accurate and
+> is why it needs a rewrite rather than an edit.
+>
+> Scope, now fully specified: the upstream fetch path (streaming, no spool, no
+> `[]byte`), the metadata branch (relay from upstream, including `304`, instead
+> of today's `404`), the narrowed `404`/`502` semantics, `If-Modified-Since`
+> relay, safe joining of a client-supplied path onto the upstream base, and the
+> contract comment at the top of the file. The tests that encode the retired
+> contract go with it — `facade_test.go:91`, `:189`, `:354`, and
+> `daemon_test.go:187`, which uses a metadata path as its probe.
+>
+> `cfg.UpstreamURL` is ready to consume: populated, validated, expanded.
+
+#### Historical framing (kept — it explains why the file is wrong)
 
 **`internal/daemon/facade.go` implements a model that has been measured false
 and is not to be extended, tuned or partially migrated until the two rulings
@@ -359,8 +538,12 @@ fetch from a configured upstream mirror and stream the bytes through.
 
 | Blocker | Why it blocks this file |
 |---|---|
-| §4.4 — does the facade proxy pkg's catalogue? | Decides what the non-package-path branch does. Today it answers `404`, which §7.1 measured breaks `pkg update` outright. Cannot be written either way without the ruling. |
-| §4.5 — how the upstream mirror is configured | The upstream fetch has no URL to fetch from until this is settled. |
+| ~~§4.4 — does the facade proxy pkg's catalogue?~~ | **RULED — ADR-005: it proxies.** The non-package branch is now specified: fetch from upstream and relay. No longer a blocker. |
+| ~~§4.5 — how the upstream mirror is configured~~ | **RULED — ADR-006, and implemented.** `cfg.UpstreamURL` is populated, validated and `${ABI}`-expanded by the time the daemon starts. No longer a blocker. |
+| ~~§4.6 — one `upstream_url` vs. several enabled repositories~~ | **RULED — ADR-007: jmj fronts one repository and coexists with the rest.** The question rested on a misreading of ADR-003 (*mirror* ≠ *repository*). Config schema unchanged. Never blocked anything. |
+
+**Nothing blocks this file any more.** It is frozen only in the sense that it
+has not been rewritten yet — the rulings it was waiting on have all landed.
 
 **Not blocked on §5.3**, and §5.3 does not depend on this — they are different
 wires. §5.3 is the work to pick up.
@@ -386,12 +569,17 @@ finds it.
   before reading a trial's peer logs and concluding the tracker is broken.
 - **`internal/daemon/facade.go` is BLOCKED and implements a superseded model.**
   Its tests pass, which is misleading: they encode the old contract, so green
-  tests mean it is consistently wrong rather than correct. Frozen until §4.4 and
-  §4.5 are ruled — see §5.7.
+  tests mean it is consistently wrong rather than correct. Frozen until §4.5 is
+  ruled — see §5.7. Note that ADR-005 has now made the *metadata* branch a known
+  defect rather than an open question: it answers `404`, which §7.1 measured
+  breaks `pkg update` outright, and it must relay from upstream instead. The
+  tests that encode the refusal (`facade_test.go:91`, `:189`, `:354`, and
+  `daemon_test.go:187`, which uses a metadata path as its probe) go with it.
 - **The facade has no answer for `If-Modified-Since`.** pkg sends conditional
   `GET`s for catalogue files. Ignoring the header wastes catalogue bandwidth on
   every `pkg update`; answering `304` from a guess would serve a stale
-  catalogue. ADR-003's proxying resolves this for free, but is unimplemented.
+  catalogue. ADR-003's proxying resolves this for free and ADR-005 now requires
+  the relay explicitly, but it is unimplemented.
 
 ## 7. Empirical findings — §7.1–§7.5 are ANSWERED
 

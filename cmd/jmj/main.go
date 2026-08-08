@@ -19,9 +19,12 @@ import (
 // string means the flag was not given, so the config (or its default) stands.
 // Shared by both modes so the generator and the daemon can never drift on
 // which flags they honour.
-func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, tempDir, cache, repoDB string) {
+func applyOverrides(cfg *config.DaemonConfig, tracker, facadeAddr, servingAddr, tempDir, cache, repoDB, upstream string) {
 	if tracker != "" {
 		cfg.TrackerURL = tracker
+	}
+	if upstream != "" {
+		cfg.UpstreamURL = upstream
 	}
 	if facadeAddr != "" {
 		cfg.FacadeAddr = facadeAddr
@@ -50,6 +53,7 @@ func main() {
 		tempDir    = flag.String("temp-dir", "", "Scratch directory for in-flight downloads (overrides config)")
 		cache      = flag.String("cache", "", "pkg cache directory, read-only (overrides config)")
 		repoDB     = flag.String("repo-db", "", "Directory holding pkg's repository databases, read-only (overrides config)")
+		upstream   = flag.String("upstream", "", "REQUIRED. Base URL of the mirror the facade proxies to, e.g. https://pkg.FreeBSD.org/${ABI}/quarterly. No default: it decides which repository pkg installs from (ADR-006)")
 		configPath = flag.String("config", "", "Path to config file (default: $HOME/.config/jmj/config.json)")
 		genConfig  = flag.Bool("generate-config", false, "Generate config JSON to stdout and exit")
 	// reads os.Args and fill those slots in
@@ -84,14 +88,28 @@ func main() {
 		// what you want; defaults are valid by construction.
 		cfg := config.DefaultConfig()
 
-		applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache, *repoDB)
+		applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache, *repoDB, *upstream)
 
 		// Fields only: the generator produces a config for whatever host
 		// will run the daemon, so it must not demand that THIS host
 		// already has the pkg cache, and must not create anything.
+		//
+		// This is also where a missing -upstream stops us (ADR-006). The
+		// exit below writes nothing to stdout, so the usual redirect leaves
+		// an empty file rather than a config that cannot start -- which is
+		// how "defaults are valid by construction" survives a key that has
+		// no default: the generator declines to emit rather than guessing.
+		//
+		// ${ABI} is deliberately NOT expanded here. Generation touches no
+		// filesystem and runs no commands (UC-01 step 2), so the placeholder
+		// travels in the file and the daemon resolves it on the host that
+		// will actually run.
 		if err := config.ValidateFields(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
 			os.Exit(1)
+		}
+		for _, w := range config.Warnings(cfg) {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 		}
 
 		enc := json.NewEncoder(os.Stdout)
@@ -119,11 +137,22 @@ func main() {
 	}
 
 	// 2. Merge flag overrides (only if flag was explicitly provided)
-	applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache, *repoDB)
+	applyOverrides(cfg, *tracker, *facadeAddr, *servingArg, *tempDir, *cache, *repoDB, *upstream)
 
 	// 3. Validate merged config
 	if err := config.Validate(cfg); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
+	}
+
+	// 4. Resolve what only this host can answer. Unlike step 3 this may run
+	// an external command -- "pkg config abi" -- but only when upstream_url
+	// actually carries ${ABI}, so a literal URL never shells out and the
+	// daemon still runs on a non-FreeBSD box (ADR-006).
+	if err := config.ExpandUpstream(cfg, config.PkgABI); err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
+	}
+	for _, w := range config.Warnings(cfg) {
+		log.Printf("Warning: %s", w)
 	}
 
 	// Start daemon (this handles everything: cache watcher, client,

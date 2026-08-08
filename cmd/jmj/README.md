@@ -8,10 +8,10 @@ nothing, and reads no config file, so it needs no write permission anywhere.
 You redirect the output to wherever you can write:
 
 ```sh
-jmj -generate-config > ~/.config/jmj/config.json
+jmj -generate-config -upstream 'https://pkg.FreeBSD.org/${ABI}/quarterly' > ~/.config/jmj/config.json
 
 # somewhere privileged? that is the shell's problem, not jmj's
-jmj -generate-config | sudo tee /usr/local/etc/jmj.json
+jmj -generate-config -upstream 'https://pkg.FreeBSD.org/${ABI}/quarterly' | sudo tee /usr/local/etc/jmj.json
 ```
 
 Flags fully determine the output; anything you leave out takes its default.
@@ -19,6 +19,7 @@ Re-running with the same flags produces the same file, so redirecting onto an
 existing config is well defined.
 
 ```
+-upstream      REQUIRED. mirror the facade proxies to   (no default)
 -tracker       tracker URL                        (default http://127.0.0.1:8080)
 -facade-addr   where pkg reaches us, host:port    (default 127.0.0.1:9001)
 -serving-addr  where peers reach us, host:port    (default 0.0.0.0:9002)
@@ -27,6 +28,30 @@ existing config is well defined.
 -repo-db       pkg's repository databases, r/o    (default /var/db/pkg/repos)
 -config        which config file to run from      (default ~/.config/jmj/config.json)
 ```
+
+`-upstream` is the one required flag, and the only setting with no default.
+Without it `-generate-config` prints nothing and exits non-zero, so a redirect
+leaves an empty file rather than a config that cannot start.
+
+It has no default because it decides **which repository you install from**. The
+daemon is pkg's only mirror and proxies the catalogue as well as the packages,
+so pkg's own config points at loopback and says nothing about which real
+repository sits behind it. Set `quarterly` when you meant `latest` and nothing
+errors — pkg builds its database from whatever is proxied, every checksum
+matches, and both branches carry the same signature. The only symptom is your
+package versions being quietly wrong. That is not a setting to guess on your
+behalf.
+
+Quote it in the shell: `${ABI}` is expanded by **jmj**, not by your shell, and
+only at startup on the machine that runs the daemon — so a config generated on
+one box stays correct on another. jmj asks `pkg config abi` for the value, and
+only ever runs that when the placeholder is actually present, which is why a
+literal URL works fine on a machine with no pkg at all.
+
+Paste `pkg+https://…` straight out of `/etc/pkg/FreeBSD.conf` and jmj will
+reject it and print the corrected URL. `http://` is allowed but warned about:
+tampering is still caught, since pkg checks the catalogue signature and jmj
+checks package hashes, but the transfer is readable in transit.
 
 The daemon listens on two ports, and they are not interchangeable:
 
@@ -76,4 +101,7 @@ At startup — not at generation time — the daemon checks the config against t
 machine it is on: `temp_dir` is created if absent and probed for writability,
 and `cache_dir` and `repo_db_dir` must already exist, because pkg's cache and
 its repository catalogues are read-only to the daemon and it will never create
-them.
+them. This is also where `${ABI}` in `upstream_url` is resolved, and where a
+placeholder that cannot be resolved stops the daemon rather than being proxied
+through as a literal. `SIGHUP` reload does the same, so a reloaded config can
+never keep an unexpanded placeholder.

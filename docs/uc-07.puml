@@ -1,0 +1,54 @@
+@startuml
+title UC-07 · Repository Metadata (pkg update) — ADR-005
+
+actor User
+participant pkg
+participant "P2P Daemon\n(mirror facade)" as Daemon
+participant "Upstream Mirror\n(ADR-003, from jmj's config)" as Upstream
+
+User -> pkg: pkg update
+note right : Also happens implicitly before other\noperations. pkg refreshes its catalogue\nfrom its mirrors — and jmj is its ONLY\nmirror (ADR-003), so there is exactly\none place this can come from.
+
+pkg -> Daemon: GET meta.conf / packagesite.pkg / data.pkg / ...\ncarrying If-Modified-Since on catalogue files
+note right : Sent to facade_addr, which is loopback-enforced.\nThat enforcement is now load-bearing: the facade\nrelays arbitrary non-package paths, so reachable\noff-host it would be an open proxy, not merely an\nopen package relay.\n\nThe conditional header is part of THIS request,\nnot a second one. Measured: pkg 2.7.5 sends\nconditional GETs for catalogue files (§7.3).
+
+activate Daemon
+
+Daemon -> Daemon: classifyPath(request)
+note right : ADR-004's package-file rule, INVERTED.\nA package request needs a segment exactly\n"All", optionally then "Hashed", and a\n.pkg file whose stem is a valid\nname-version. Anything else is metadata.\nNote packagesite.pkg ends in .pkg but does\nnot sit under All/ — which is precisely why\nthat condition is load-bearing here.
+
+Daemon -> Daemon: joinToUpstreamBase(path)
+note right : The path is CLIENT-SUPPLIED, unlike a package\nrequest which is reduced to a validated\nname-version first. Joining it to the upstream\nbase must not permit escaping that base:\nno dot-dot traversal, no absolute or\nscheme-relative paths.
+
+Daemon -> Upstream: same path, forwarding If-Modified-Since
+activate Upstream
+note right : The daemon does NOT answer from itself.\nIt holds no catalogue, tracks no upstream\nmodification times, and must never\nsynthesise a 304 from a guess — that\nwould serve a stale catalogue.
+
+alt upstream answers 200
+    Upstream --> Daemon: 200 + catalogue bytes
+    Daemon --> pkg: 200 relayed, streamed straight through
+    note right : No spool, no cache, no verification,\nno modification. There is nothing to\nverify against — the repo DB carries no\nhash for a catalogue, and the catalogue\nIS the thing being updated. Nothing above\nthe copy buffer is resident; a []byte here\nis the same regression it is on the peer\nwire.
+
+    pkg -> pkg: verifyRepositorySignature()
+    note right : RELAYING IS NOT VOUCHING.\nThe bytes originated at the real mirror,\nthe daemon asserts nothing about them, and\npkg checks the signature against its own\nfingerprints. This is why "the signed catalog\ncomes from a real mirror" survives ADR-005\nwhile "never proxies metadata" does not.\nDemonstrated: 37,789 packages,\nsignature_type fingerprints intact.
+
+    pkg -> pkg: populate repository database
+    note right : This is what makes jmj's upstream setting\nconsequential: it does not merely supply\nfallback bytes, it DETERMINES WHICH\nREPOSITORY pkg gets. pkg's own config\npoints this repo at loopback and says\nnothing about which real repository sits\nbehind it. A wrong upstream is\nself-consistent, not an error — see\nHANDOFF §4.5.
+    pkg --> User: catalogue up to date
+
+else upstream answers 304
+    Upstream --> Daemon: 304 Not Modified
+    Daemon --> pkg: 304 relayed unchanged
+    note right : Relayed, never synthesised. This is not an\noptimisation: catalogue traffic is pure\npass-through that the swarm never reduces,\nso the conditional GET is what keeps the\ncost of being the only mirror small.
+    pkg --> User: catalogue already current
+
+else upstream unreachable or fails
+    Upstream --> Daemon: error
+    Daemon --> pkg: 502 — TERMINAL
+    note right : There is no next mirror. Fall-through exists\nbetween mirrors WITHIN a repository, never\nbetween repositories, and jmj is a repository.\nMeasured false in the old design:\ndocs/logs/claude-pkg-mirror-verification.md §7.1.\npkg update fails outright.\n\nNot a NEW cost — §7.1 also measured that an\nunreachable facade already breaks pkg update.
+    pkg --> User: repository error
+end
+
+deactivate Upstream
+deactivate Daemon
+@enduml

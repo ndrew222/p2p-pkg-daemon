@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 )
 
 // DaemonConfig holds persistent configuration fields. as JSON tag
@@ -50,6 +52,25 @@ type DaemonConfig struct {
 	// creates this directory. Overridable for the same reason CacheDir is
 	// -- so the daemon can be exercised on a non-FreeBSD box.
 	RepoDBDir string `json:"repo_db_dir"`
+
+	// UpstreamURL is the conventional mirror the facade proxies to: package
+	// bytes when no peer can supply them (ADR-003) and repository metadata
+	// always (ADR-005). ADR-006 governs this field.
+	//
+	// It is the ONLY key with no default, and the only required one. Under
+	// ADR-005 the facade proxies the catalogue, so this URL does not merely
+	// name a fallback source -- it determines WHICH REPOSITORY pkg ends up
+	// with. Defaulting it would silently choose a branch on the operator's
+	// behalf, and a wrong branch does not error: pkg populates its database
+	// from whatever is proxied, every hash matches, and both branches carry
+	// the same signature. A setting with that consequence is stated, not
+	// guessed. -generate-config refuses to emit a config without it, which is
+	// what keeps "defaults are valid by construction" true (UC-01).
+	//
+	// May contain the literal ${ABI}, as pkg's own repository URLs do. It is
+	// expanded at STARTUP and never at generation time, so a config stays
+	// portable between hosts -- see ExpandUpstream.
+	UpstreamURL string `json:"upstream_url"`
 }
 
 // DefaultConfig returns a config with hardcoded defaults.
@@ -73,6 +94,10 @@ func DefaultConfig() *DaemonConfig {
 		// FreeBSD-ports and FreeBSD-ports-kmods, so this is a
 		// directory to scan and not a single file to open.
 		RepoDBDir: "/var/db/pkg/repos",
+		// UpstreamURL is deliberately absent. It is the one field with no
+		// default: see its doc comment and ADR-006. Leaving it empty here
+		// is what makes -generate-config fail without -upstream, which is
+		// the mechanism that keeps every emitted config startable.
 	}
 }
 
@@ -241,6 +266,117 @@ func ValidateFields(cfg *DaemonConfig) error {
 		return fmt.Errorf("repo_db_dir must be set (pkg's repository databases, e.g. /var/db/pkg/repos)")
 	}
 
+	if err := validateUpstreamURL(cfg.UpstreamURL); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ABIPlaceholder is the one variable expanded inside upstream_url, spelled as
+// pkg spells it in its own repository URLs. pkg may support others; that set
+// has not been measured, so anything else is left alone and caught by the
+// unexpanded-placeholder check in ExpandUpstream rather than mis-expanded.
+const ABIPlaceholder = "${ABI}"
+
+// validateUpstreamURL judges upstream_url from the value alone (ADR-006).
+//
+// Required, because it decides which repository pkg ends up with and has no
+// safe default. Note that ${ABI} survives url.ParseRequestURI as an ordinary
+// path segment, so a config carrying the placeholder validates here and is
+// resolved later against the host -- which is the whole point of the split.
+func validateUpstreamURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("upstream_url must be set: it is the mirror the facade proxies to for metadata (ADR-005) and for packages no peer holds (ADR-003), and it has no default because it decides which repository pkg installs from. Pass -upstream, e.g. -upstream https://pkg.FreeBSD.org/${ABI}/quarterly")
+	}
+
+	u, err := url.ParseRequestURI(raw)
+	if err != nil {
+		return fmt.Errorf("invalid upstream_url %q: %w", raw, err)
+	}
+
+	// "pkg+https://..." is the form in pkg's own config and the obvious
+	// thing to paste. Reported rather than silently stripped, on the same
+	// principle as legacyKeys: a wrong config is named, not reinterpreted.
+	if rest, found := strings.CutPrefix(u.Scheme, "pkg+"); found {
+		return fmt.Errorf("upstream_url %q carries pkg's %q scheme prefix; jmj wants a plain URL an HTTP client accepts -- drop the \"pkg+\" and use %q", raw, u.Scheme, rest+"://"+u.Host+u.Path)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("upstream_url scheme must be http or https, got %q in %q", u.Scheme, raw)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("upstream_url %q has no host", raw)
+	}
+
+	return nil
+}
+
+// Warnings are non-fatal observations about a valid config, returned rather
+// than logged so that ValidateFields stays free of side effects and the
+// generator keeps stdout clean for the redirect. Callers log them to stderr.
+func Warnings(cfg *DaemonConfig) []string {
+	var out []string
+	// Plaintext upstream is permitted, unlike a non-loopback facade_addr
+	// which is refused. The asymmetry is deliberate (ADR-006): a non-loopback
+	// facade is an open relay, whereas plaintext upstream is not an integrity
+	// hole -- pkg verifies the catalogue signature and jmj verifies package
+	// hashes, so tampering is caught either way. What is lost is privacy and
+	// early detection, which is warning-shaped.
+	if u, err := url.ParseRequestURI(cfg.UpstreamURL); err == nil && u.Scheme == "http" {
+		out = append(out, fmt.Sprintf("upstream_url %q is plaintext http; prefer https. Tampering is still caught (pkg checks the catalogue signature, jmj checks package hashes), but the transfer is readable in transit", cfg.UpstreamURL))
+	}
+	return out
+}
+
+// ABIFunc reports the host's pkg ABI, e.g. "FreeBSD:15:amd64". Injected so the
+// expansion can be tested off FreeBSD.
+type ABIFunc func() (string, error)
+
+// PkgABI asks pkg for the host's ABI.
+//
+// This is the daemon's one execution of an external binary, permitted by
+// ADR-006 and kept narrow on purpose: one command, one question, and only
+// when upstream_url actually carries the placeholder. Reading pkg's files was
+// already precedent; this asks it a question and still never modifies it.
+func PkgABI() (string, error) {
+	out, err := exec.Command("pkg", "config", "abi").Output()
+	if err != nil {
+		return "", fmt.Errorf("could not run \"pkg config abi\": %w", err)
+	}
+	abi := strings.TrimSpace(string(out))
+	if abi == "" {
+		return "", fmt.Errorf("\"pkg config abi\" returned nothing")
+	}
+	return abi, nil
+}
+
+// ExpandUpstream resolves ${ABI} in upstream_url against THIS host.
+//
+// Startup-only, never generation-time: UC-01 step 2 guarantees the generator
+// touches no filesystem so a config can be written on one machine for another,
+// which means the emitted config keeps the literal ${ABI} and this resolves it
+// where the daemon actually runs (UC-01 step 7's "validate against this
+// machine" phase).
+//
+// abi is called ONLY when the placeholder is present, so a literal URL never
+// shells out and the daemon stays exercisable on a non-FreeBSD box -- the same
+// reason cache_dir and repo_db_dir are overridable. Failure is fatal: proxying
+// from a URL with an unexpanded placeholder in it is the bad outcome.
+func ExpandUpstream(cfg *DaemonConfig, abi ABIFunc) error {
+	if strings.Contains(cfg.UpstreamURL, ABIPlaceholder) {
+		v, err := abi()
+		if err != nil {
+			return fmt.Errorf("upstream_url %q needs %s expanded, but the host ABI could not be determined: %w", cfg.UpstreamURL, ABIPlaceholder, err)
+		}
+		cfg.UpstreamURL = strings.ReplaceAll(cfg.UpstreamURL, ABIPlaceholder, v)
+	}
+
+	// Catches a variable we do not expand (pkg may support others; that set
+	// is unmeasured). Better to refuse than to proxy from a URL with a
+	// literal "${...}" in the path.
+	if i := strings.Index(cfg.UpstreamURL, "${"); i >= 0 {
+		return fmt.Errorf("upstream_url %q still carries an unexpanded placeholder at offset %d; only %s is expanded", cfg.UpstreamURL, i, ABIPlaceholder)
+	}
 	return nil
 }
 

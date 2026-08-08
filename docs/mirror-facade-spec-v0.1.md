@@ -13,7 +13,8 @@
 > | Fetch semantics, status codes, verification placement, no-cache rule | `docs/adr/adr-003-facade-fetch-semantics.md` |
 > | *Request surface* — the `All/` + `Hashed/` + `~hash10` path rule, and `GET`-only | `docs/adr/adr-004-facade-path-rule.md` **(Approved)** |
 > | Peer blacklist | UC-02 §7/§11c and `docs/logs/claude-peer-blacklist.md` |
-> | Open questions 6 and 7 (upstream mirror config; metadata proxying) | `docs/logs/HANDOFF.md` §4.5 and §4.4 — both still open |
+> | Open question 7 (metadata proxying) | **`docs/adr/adr-005-metadata-proxying.md` (Approved)** — ruled: the facade proxies metadata. HANDOFF §4.4 is closed |
+> | Open question 6 (upstream mirror config) | `docs/logs/HANDOFF.md` §4.5 — still open |
 >
 > **The path rule in *Request surface* below is now governed by ADR-004 (Approved, 2026-08-08).** Shipped code depends on it (`internal/daemon/facade.go`, `watcher.go`, `repodb.go`), but ADR-004 is the specification to read; this section is retained as history. Everything in this document is now history: kept because it records why the design changed, not because it should be obeyed.
 >
@@ -154,9 +155,14 @@ after a tilde. A tilde is legal in a pkg version, so a looser rule would eat
 part of a real version string and produce an identifier no peer holds.
 
 The signed catalog is the root of the integrity model and must always come from
-a real mirror. The daemon never serves, caches or proxies metadata.
+a real mirror. ~~The daemon never serves, caches or proxies metadata.~~
 
-> ⚠️ **OPEN — do not implement either reading. Ask the owner.** The sentence
+> ✅ **RULED — `docs/adr/adr-005-metadata-proxying.md` (Approved, 2026-08-08).
+> The facade proxies metadata.** The struck sentence above is retired; the one
+> before it survives, because relaying is not vouching. Read ADR-005, not the
+> analysis below — it is kept only because it records why the rule changed.
+>
+> ⚠️ ~~**OPEN — do not implement either reading. Ask the owner.**~~ The sentence
 > above is in direct tension with ADR-003 and the ADR does not settle it. Its
 > *Decision* section rules only on package files, but it also makes jmj pkg's
 > **only** mirror — and §7.1 measured that a facade which fails a metadata
@@ -202,7 +208,7 @@ The governing rule is now:
 | Package is not in pkg's repository database (no expected hash) | `404` | — |
 | Method other than `GET` | `405` | — |
 | Peers unavailable *and* the upstream fetch also failed | `502` | ADR-003 |
-| Non-package-file path (metadata, catalog, anything not `All/*.pkg`) | ⚠️ **open** | UC-07 — see the warning above |
+| Non-package-file path (metadata, catalog, anything not `All/*.pkg`) | upstream's own status, relayed (`200`/`304`/…) | UC-07, ADR-005 |
 
 "Peers unavailable" collapses four conditions the old table listed separately —
 tracker unreachable, tracker returned an empty list, every holder blacklisted,
@@ -259,9 +265,10 @@ expiry (nothing specifies one). See `docs/logs/claude-peer-blacklist.md`.
   longer means what it used to: the retry mechanism is now the facade's own
   peer loop followed by the upstream fetch, not pkg's fall-through. By the time
   a code reaches pkg, every source has been tried.
-- **No metadata proxying**, per UC-07 and the integrity model — ⚠️ **but see
-  the open flag under *Request surface*.** ADR-003 appears to require the
-  opposite and does not say so explicitly. Unresolved.
+- ~~**No metadata proxying**, per UC-07 and the integrity model.~~ **Reversed by
+  ADR-005 (Approved):** the facade proxies metadata. ADR-003 did require the
+  opposite of this line without saying so explicitly, and the owner has now
+  ruled. Relaying is not vouching; pkg still verifies the signature itself.
 
 ## Open questions — not resolved here
 
@@ -341,6 +348,7 @@ expiry (nothing specifies one). See `docs/logs/claude-peer-blacklist.md`.
    hand-roll a resolver. See `docs/logs/HANDOFF.md` §4.5 for the candidate of
    discovering the URL from `/etc/pkg/FreeBSD.conf` rather than adding a key.
 
-7. **Metadata proxying.** See the flag under *Request surface*. ADR-003 makes
+7. **Metadata proxying.** ~~See the flag under *Request surface*. ADR-003 makes
    jmj pkg's only mirror, which appears to force it, while this spec and UC-07
-   forbid it. Needs its own ADR.
+   forbid it. Needs its own ADR.~~ **Answered — the facade proxies metadata.**
+   `docs/adr/adr-005-metadata-proxying.md` (Approved, 2026-08-08) is that ADR.
