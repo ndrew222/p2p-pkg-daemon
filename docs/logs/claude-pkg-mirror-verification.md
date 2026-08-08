@@ -3,8 +3,16 @@
 Author: claude. Feature: HANDOFF §7.1–§7.5 empirical verification.
 
 **Status: RUN. §7.1–§7.5 are all answered.** The owner granted permission and
-the experiment was executed against `root@45.76.163.52` on 2026-08-08. The host
-was returned to baseline afterwards (teardown verified — see the end).
+the experiment was executed against a FreeBSD 15.1-RELEASE-p1 host on
+2026-08-08. The host was returned to baseline afterwards (teardown verified —
+see the end).
+
+> **The host address is redacted (`<TEST-HOST>`) because this repository is
+> public.** Ask the owner for it. Note that redacting it here does **not** undo
+> its earlier publication: it was committed in plain text and pushed, so it
+> remains in this repository's git history and in anything that mirrored it.
+> Treat that address as disclosed and rotate credentials on that basis rather
+> than assuming this edit contained it.
 
 **The headline is bad news: §7.1's load-bearing assumption is false as the
 design relies on it.** pkg does fall through on a non-200, but only between
@@ -24,7 +32,7 @@ is *the* load-bearing assumption of the whole design and has never been tested.
 
 ## Recon — what is now measured about the host
 
-`root@45.76.163.52`, read-only commands only. Nothing was written.
+`root@<TEST-HOST>`, read-only commands only. Nothing was written.
 
 | Fact | Value |
 |---|---|
@@ -391,7 +399,7 @@ demo.
 teardown removes them.
 
 ```sh
-H=root@45.76.163.52
+H=root@<TEST-HOST>
 
 # 1. Ship the probe and start it in proxy mode (a faithful mirror).
 ssh $H 'mkdir -p /root/jmjprobe && echo proxy > /root/jmjprobe/mode'

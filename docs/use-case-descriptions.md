@@ -170,14 +170,14 @@
 | **Actors** | Primary | pkg (triggered by the user's `pkg update`, or implicitly before other operations) |  |
 |  | Secondary | P2P Daemon, conventional mirror |  |
 | **Trigger** | pkg requests any non-package-file path from the daemon |  |  |
-| **Precondition** | Daemon is running and configured as pkg's first mirror. |  |  |
+| **Precondition** | ~~Daemon is running and configured as pkg's first mirror.~~ There is no "first mirror" position to occupy — ADR-003 makes jmj pkg's only mirror. |  |  |
 | **Postcondition** | pkg holds a current, signed repository catalog obtained from a conventional mirror. |  |  |
 | **Error States** | 1 | Next mirror also fails (outside this project's scope) |  |
 | **Operational Flow** | **Step** | **Action** |  |
 |  | 1 | User runs `pkg update` (or pkg refreshes its catalog implicitly) |  |
-|  | 2 | pkg requests the repository metadata from its first mirror, the daemon |  |
-|  | 3 | Daemon recognises a non-package-file path and returns an HTTP error |  |
-|  | 4 | pkg falls through to its next mirror, fetches the catalog there, and verifies the repository signature as it normally does |  |
+|  | 2 | pkg requests the repository metadata from ~~its first mirror~~ its only mirror, the daemon |  |
+|  | 3 | ⚠️ ~~Daemon recognises a non-package-file path and returns an HTTP error~~ — **undecided.** What the daemon should do here is the open ruling; returning an error is what makes step 4 impossible |  |
+|  | 4 | ⚠️ ~~pkg falls through to its next mirror, fetches the catalog there, and verifies the repository signature as it normally does~~ — **THIS DOES NOT HAPPEN.** Measured false (§7.1). `pkg update` fails outright instead. Steps 3 and 4 are the whole of this use case and neither survives; do not implement either, and do not invent a replacement — see the description |  |
 | **Alternative Flow** | **Error State:** Next mirror also fails |  |  |
 |  | **Step** | **Action** |  |
 |  | 4a | pkg reports its ordinary repository error to the user; the daemon is not involved |  |
