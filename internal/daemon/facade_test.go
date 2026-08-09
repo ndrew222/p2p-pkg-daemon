@@ -1,15 +1,16 @@
 package daemon
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/peer"
@@ -45,31 +46,49 @@ func (f fakeRepo) ExpectedFileSizeBytes(nameVersion string) (int64, bool) {
 	return r.size, ok
 }
 
+// fakeCache is a peer.PackageSource for the facade's tests: it hands back an
+// open handle over an in-memory reader.
+//
+// A test double may hold bytes; the production source may not. This one exists
+// so the facade's tests do not have to build a directory tree per case, and
+// the constant-memory guarantee is asserted where it lives, in
+// internal/peer -- see TestNoByteSliceInTheTransferSignatures and
+// TestPackageLargerThanTheRetiredCapTransfersWithoutResidency.
 type fakeCache map[string][]byte
 
-func (f fakeCache) Get(nameVersion string) ([]byte, bool) {
+func (f fakeCache) Open(nameVersion string) (io.ReadSeekCloser, int64, bool) {
 	b, ok := f[nameVersion]
-	return b, ok
+	if !ok {
+		return nil, 0, false
+	}
+	return nopSeekCloser{bytes.NewReader(b)}, int64(len(b)), true
 }
+
+type nopSeekCloser struct{ io.ReadSeeker }
+
+func (nopSeekCloser) Close() error { return nil }
+
+// tamperedBytes is the SAME LENGTH as the genuine content on purpose. Under
+// the v0.2 wire a body of the wrong length is caught by the size bound, which
+// abandons the peer WITHOUT blacklisting it -- the size is a bound, not a
+// verdict. Only a hash mismatch is evidence about the peer (UC-02 §11c), and a
+// hash mismatch is only reachable at the right length.
+var tamperedBytes = []byte("TAMPERED!!!!!")
 
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
 
-// startPeer runs a real peer.Server on a random port and returns its address.
-// The 200 path is worth exercising end to end: it is the only one that proves
-// the facade, the fetch loop and hash verification agree.
+// startPeer runs a real peer.Server on a random port and returns its address
+// in the host:port form the tracker hands out. The 200 path is worth
+// exercising end to end: it is the only one that proves the facade, the fetch
+// loop and hash verification agree.
 func startPeer(t *testing.T, cache fakeCache) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	srv := &peer.Server{Source: cache}
-	go srv.Serve(ln)
-	return ln.Addr().String()
+	ts := httptest.NewServer(&peer.Server{Source: cache})
+	t.Cleanup(ts.Close)
+	return strings.TrimPrefix(ts.URL, "http://")
 }
 
 // --- path classification ----------------------------------------------------
@@ -161,7 +180,7 @@ func TestFacadeStatusCodes(t *testing.T) {
 
 	goodPeer := startPeer(t, fakeCache{pkgName: content})
 	// A peer that answers but with the wrong bytes: hash mismatch (UC-02 9c).
-	corruptPeer := startPeer(t, fakeCache{pkgName: []byte("tampered")})
+	corruptPeer := startPeer(t, fakeCache{pkgName: tamperedBytes})
 	// A peer that is not listening at all: connection failure (UC-02 8e).
 	deadPeer := "127.0.0.1:1"
 
@@ -260,7 +279,7 @@ func TestFacadeStatusCodes(t *testing.T) {
 func TestFacadeNeverServesUnverifiedBytes(t *testing.T) {
 	const pkgName = "nginx-1.24.0_2"
 	content := []byte("package bytes")
-	corruptPeer := startPeer(t, fakeCache{pkgName: []byte("tampered")})
+	corruptPeer := startPeer(t, fakeCache{pkgName: tamperedBytes})
 
 	f := &Facade{
 		Peers: fakeLister{addrs: []string{corruptPeer}},
@@ -272,7 +291,7 @@ func TestFacadeNeverServesUnverifiedBytes(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
 	}
-	if body, _ := io.ReadAll(rec.Body); string(body) == "tampered" {
+	if body, _ := io.ReadAll(rec.Body); string(body) == string(tamperedBytes) {
 		t.Fatal("facade served unverified bytes to pkg")
 	}
 }
@@ -284,7 +303,7 @@ func TestFacadeBlacklistOutlivesOneRequest(t *testing.T) {
 	const pkgPath = "/latest/All/nginx-1.24.0_2.pkg"
 	content := []byte("package bytes")
 
-	corruptPeer := startPeer(t, fakeCache{pkgName: []byte("tampered")})
+	corruptPeer := startPeer(t, fakeCache{pkgName: tamperedBytes})
 	goodPeer := startPeer(t, fakeCache{pkgName: content})
 
 	f := &Facade{

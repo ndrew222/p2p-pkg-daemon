@@ -50,7 +50,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -140,7 +139,7 @@ func (f *Facade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f.servePackage(w, nameVersion)
+	f.servePackage(w, r, nameVersion)
 }
 
 // servePackage runs UC-02 steps 5-10 for one package.
@@ -151,14 +150,15 @@ func (f *Facade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // the first is a 404 (this mirror holds nothing), the second a 502 (peers
 // claimed it and failed to deliver). The loop itself is peer.FetchFirst, which
 // is where blacklist skipping and marking live.
-func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
+func (f *Facade) servePackage(w http.ResponseWriter, r *http.Request, nameVersion string) {
 	if f.Repo == nil {
 		log.Printf("facade: %q: no repository database wired up", nameVersion)
 		httpError(w, http.StatusNotFound, "no expected hash for this package")
 		return
 	}
 	expectedHash, found := f.Repo.ExpectedHash(nameVersion)
-	if !found {
+	expectedSize, sizeFound := f.Repo.ExpectedFileSizeBytes(nameVersion)
+	if !found || !sizeFound {
 		log.Printf("facade: %q: not in the repository database", nameVersion)
 		httpError(w, http.StatusNotFound, "no expected hash for this package")
 		return
@@ -183,8 +183,27 @@ func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
 	// failing verification is blacklisted on the way past (UC-02 §11c) so
 	// later requests do not pay for it again. FetchFirst logs which peer
 	// served the bytes, so nothing here needs the winning address.
-	data, err := peer.FetchFirst(addrs, nameVersion, expectedHash, &f.Blacklist)
+	// SEAM WITH §5.3 (peer wire v0.2). FetchFirst now spools to temp_dir
+	// itself and hands back an open, rewound, already-verified file, so the
+	// facade's own spool step is gone: the fetch's temp file IS the buffer
+	// UC-02 §8 asks for. Nothing above the copy buffer is resident at any
+	// point, which is what makes the 2.83 GiB package servable at all.
+	//
+	// This block is a mechanical adaptation to the new signature, not a
+	// design change. The file is being rewritten wholesale under §5.7
+	// (ADR-003/005/006) and everything around it still implements the
+	// measured-false fall-through model.
+	want := peer.Want{Hash: expectedHash, Size: expectedSize}
+	tmp, err := peer.FetchFirst(r.Context(), addrs, nameVersion, want, f.TempDir, &f.Blacklist)
 	if err != nil {
+		// A spool failure is OURS -- an unwritable temp_dir -- not a
+		// missing package. pkg must see a 5xx so it does not conclude
+		// the file does not exist.
+		if errors.Is(err, peer.ErrSpool) {
+			log.Printf("facade: %q: %v", nameVersion, err)
+			httpError(w, http.StatusInternalServerError, "cannot buffer the download")
+			return
+		}
 		// Non-empty peer list, no verified bytes: either every attempt failed
 		// or everything on the list is already known corrupt. Both are an
 		// upstream fault, not "this mirror does not have it".
@@ -192,76 +211,20 @@ func (f *Facade) servePackage(w http.ResponseWriter, nameVersion string) {
 		httpError(w, http.StatusBadGateway, "no peer could serve a verified copy")
 		return
 	}
-
-	// Spool the verified bytes through temp_dir before answering. UC-02 §8: a
-	// download lands in the temp buffer, and only a complete, verified file
-	// may reach pkg.
-	//
-	// Note what this costs today: the fetch has already materialised the whole
-	// package in memory, so the spool is a disk round-trip that buys nothing
-	// yet. It is here because the peer wire migration makes the fetch
-	// streaming, at which point this file is what keeps a 900 MB package off
-	// the heap. Delete it only together with that.
-	if err := f.spool(w, nameVersion, data); err != nil {
-		log.Printf("facade: %q: %v", nameVersion, err)
-		httpError(w, http.StatusInternalServerError, "cannot buffer the download")
-		return
-	}
-	log.Printf("facade: served %q (%d bytes)", nameVersion, len(data))
-}
-
-// spool writes verified bytes to a temp file and serves the file to pkg.
-//
-// It returns an error ONLY for failures that happen before anything has been
-// written to w, so the caller can still send a status code. Once the response
-// has begun, a failure is logged and nil is returned: the status line is
-// already on the wire and there is nothing left to say.
-func (f *Facade) spool(w http.ResponseWriter, nameVersion string, data []byte) error {
-	tmp, err := os.CreateTemp(f.TempDir, "jmj-"+sanitiseForFilename(nameVersion)+"-*")
-	if err != nil {
-		return fmt.Errorf("temp file: %w", err)
-	}
-	// The buffer is per-request and ephemeral. Remove it on every path,
+	// The buffer is per-request and ephemeral: remove it on every path,
 	// including the ones where pkg hangs up on us.
-	defer func() {
-		tmp.Close()
-		if err := os.Remove(tmp.Name()); err != nil && !os.IsNotExist(err) {
-			log.Printf("facade: %q: removing %s: %v", nameVersion, tmp.Name(), err)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("writing %s: %w", tmp.Name(), err)
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewinding %s: %w", tmp.Name(), err)
-	}
+	defer peer.Discard(tmp)
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Content-Length", strconv.FormatInt(expectedSize, 10))
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, tmp); err != nil {
-		// pkg hung up mid-response. Nothing to recover.
+		// pkg hung up mid-response. The status line is already on the
+		// wire and there is nothing left to say.
 		log.Printf("facade: %q: write to pkg: %v", nameVersion, err)
+		return
 	}
-	return nil
-}
-
-// sanitiseForFilename keeps a temp file name readable for a human watching
-// temp_dir without letting a name-version off the wire steer where the file
-// lands. Everything outside the name-version alphabet becomes an underscore,
-// so no separator, dot segment or NUL can survive into the path.
-func sanitiseForFilename(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return r
-		case r == '-', r == '.', r == '_':
-			return r
-		default:
-			return '_'
-		}
-	}, s)
+	log.Printf("facade: served %q (%d bytes)", nameVersion, expectedSize)
 }
 
 // packageRequest classifies a request path.

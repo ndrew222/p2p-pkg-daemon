@@ -56,13 +56,17 @@ commit as the work.
 
 Current branch: `main`; everything through `bc5fabf` is merged.
 
-ADR-001 through -007 are all Approved, and **§5.3 is the next work item and is
-fully unblocked.**
+ADR-001 through -007 are all Approved. **§5.3 — the peer wire migration and the
+cache-backed seeder — is done**; §5.4's seed-server mount is what remains of it.
 
 **§4.4, §4.5 and §4.6 are all closed** (ADR-005, ADR-006 and ADR-007, ruled
-2026-08-08). **No work is blocked and no question is open for the owner.** §5.7
-— the facade rework — is unblocked for the first time, and is now the largest
-open item alongside §5.3.
+2026-08-08) and **§4.7 is ruled** (the two ADR-002 config key names,
+2026-08-09). §5.7 — the facade rework — is unblocked and is now the largest open
+item.
+
+**One question is with the owner**, raised while implementing §5.3: the peer
+spec contradicts itself on whether a non-exact path is `400` or `404`. See §5.3
+and `docs/logs/claude-peer-wire-v0.2.md`. Nothing is blocked on it.
 
 Read before starting §5.7: ADR-003 (fetch semantics), ADR-004 (path rule),
 ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj fronts
@@ -79,14 +83,14 @@ that package.
 |---|---|
 | `AGENTS.md` | Current. Constraints and precedence. ADRs are rank 1. |
 | `docs/adr/adr-001-transport-nat.md` | **Approved.** No NAT traversal; plain HTTP over TCP to the advertised IP:port. |
-| `docs/adr/adr-002-serving-side-concurrency.md` | **Approved.** Global *and* per-remote-IP semaphores, `503` when either is full, default `0` = unlimited. Implement with §5.3. |
+| `docs/adr/adr-002-serving-side-concurrency.md` | **Approved.** Global *and* per-remote-IP semaphores, `503` when either is full, default `0` = unlimited. **Implemented** with §5.3; the two key names are §4.7. |
 | `docs/adr/adr-003-facade-fetch-semantics.md` | **Approved.** Facade proxies to upstream on a peer miss; peer path spools, upstream path streams; no facade cache. |
 | `docs/adr/adr-004-facade-path-rule.md` | **Approved.** Carries the `All/` + `Hashed/` + `~hash10` path rule out of the deprecated facade spec. Introduces no new decision; if it differs from that spec's text, the spec wins. |
 | `docs/adr/adr-005-metadata-proxying.md` | **Approved.** The facade proxies non-package paths to the configured upstream and relays the response, including `304`. Closes §4.4; retires *"never proxies metadata"*. |
 | `docs/adr/adr-006-upstream-mirror-config.md` | **Approved and implemented** (the key, not its consumer). `upstream_url` in jmj's config: required, no default, `${ABI}` expanded at startup, plaintext warned not refused. Closes §4.5. |
 | `docs/adr/adr-007-repository-topology.md` | **Approved.** jmj fronts one repository, replaces that one, coexists with every other enabled repository. `upstream_url` stays singular. Closes §4.6; corrects a misreading of ADR-003 in §4.6 and ADR-006. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
-| `docs/peer-transfer-spec-v0.2.md` | Current, **not implemented**. Your main work item; carries its own migration table and definition of done. Now includes ADR-002's `503`. |
+| `docs/peer-transfer-spec-v0.2.md` | Current **and implemented** (§5.3), except the seed server's mount (§5.4). Its migration table and definition of done are both discharged. One self-contradiction is open with the owner — `400` vs `404` for a non-exact path; see §5.3. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
 | `docs/uc-07.puml` | Current, **not implemented**. New — UC-07 had no diagram before ADR-005. Carries the relay flow, the 304 branch and the terminal `502`. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
@@ -158,19 +162,20 @@ Gate passes. What exists and works:
 - `internal/daemon/facade.go` — the mirror facade handler, **mounted on
   `facade_addr`**. Spools through `temp_dir`; skips and marks blacklisted peers
   via `peer.FetchFirst`.
-- `internal/peer` + `internal/peerwire` — fetch and seed over the interim binary
-  framing. **Not mounted**, and being replaced (§5.3).
+- `internal/peer` — fetch and seed over the v0.2 HTTP wire (§5.3). The seeder
+  is an `http.Server` with ADR-002's two caps; the requester spools to
+  `temp_dir` and returns an open file. `internal/peerwire` is deleted.
 - `internal/peer/blacklist.go` — the local peer blacklist (§5.5). In-memory, no
   expiry, not persisted.
 
-**What does not exist at all: the seed half.** There is no production
-`PackageSource` implementation anywhere in the tree — the only implementors are
-two test fakes and `cmd/demo`'s in-memory store, and nothing reads the pkg cache
-for file *contents* (the watcher reads it for names only). `peer.Server` is
-constructed in exactly one place, `cmd/demo/main.go`.
+**The seed half now exists.** `internal/daemon/cachesource.go` is the
+production `peer.PackageSource`: it opens `<cache_dir>/<name-version>.pkg`
+read-only and hands back the handle, so the seeder streams from the pkg cache
+and never holds a package. It is also the path-safety boundary for a
+name-version arriving off the wire — `peer.validName` deliberately is not one.
 
-So **§5.3 is a build, not just a migration.** Budget for writing a cache-backed
-seeder from scratch.
+§5.3 was a build, not just a migration, and that part is done. What is still
+outstanding is the wiring: see §5.4.
 
 **The facade model has now been exercised against real pkg and works** — see §7.
 A stand-in that proxied the signed catalogue was accepted as a genuine
@@ -494,7 +499,25 @@ packages added since startup. `Reload()` exists and is tested; wiring a trigger
 is unclaimed. Choosing between a watch on `repo_db_dir` and a periodic reload is
 a design decision in no spec — **ask before picking**.
 
-### 5.3 Peer wire migration — **NEXT, fully unblocked**
+### 5.3 Peer wire migration — **DONE**
+
+Implemented to `docs/peer-transfer-spec-v0.2.md`'s migration table and
+definition of done; work log at `docs/logs/claude-peer-wire-v0.2.md`.
+`internal/peerwire` is deleted, `peer.Server` is an `http.Server`,
+`FetchFromPeer` returns an open `*os.File`, `PackageSource` returns an open
+handle and a size, `cmd/demo` runs the real wire, and the cache-backed seeder
+exists at `internal/daemon/cachesource.go`. Mounting it on `serving_addr` is
+§5.4, which is where that half is recorded.
+
+**One item is with the owner** — the spec's *Request surface* section says a
+non-exact path is a `404` while its *Responses* table says `400`. Implemented
+per the table, because `404` carries the UC-06 §5b re-announce obligation and a
+malformed path is no evidence about what this daemon holds. Flagged in the work
+log; flipping it is a one-line change.
+
+The original statement of the work follows.
+
+---
 
 Work to `docs/peer-transfer-spec-v0.2.md`'s migration table and definition of
 done. Deletes `internal/peerwire`; rewrites `peer.Server`, `FetchFromPeer`,
@@ -512,16 +535,16 @@ Three things it must carry that are easy to lose:
 - **Constant memory on both ends.** A `[]byte` in either signature is a
   regression, and is what currently OOMs a 1 GiB host on the 2.83 GiB package.
 
-**Do not delete `internal/peerwire` before that size bound is in place.**
-`MaxPayload` (`wire.go:24`, enforced at `:53`) is today the *only* length check
-on the fetch path, so removing the package first leaves the fetch loop with
-nothing between it and a hostile peer streaming unbounded bytes. This is
-ordering within §5.3, not a reprieve — `MaxPayload` is a global cap of exactly
-the kind §8 forbids, and it goes when its replacement lands, in the same change.
+~~**Do not delete `internal/peerwire` before that size bound is in place.**~~
+`MaxPayload` was the only length check on the fetch path, so the package could
+not go before its replacement did. It went in the same change, as required:
+`io.LimitReader(body, want.Size+1)` plus the `Content-Length` check now stand
+between the fetch loop and a hostile peer, and they are stricter than the
+constant ever was — exact, per package, and with no ceiling.
 
 ### 5.4 Mount the facade and the seed server — **facade half DONE**
 
-The seed-server half belongs to §5.3. Trap for whoever touches this: a nil
+The seed-server half belongs to §5.3 and is not yet mounted. Trap for whoever touches this: a nil
 `*Repositories` assigned into an interface field is a **non-nil interface
 holding a nil pointer**, so every `== nil` check downstream passes and the first
 call panics. Both wiring sites go through `Daemon.repository()` for this reason;
@@ -586,8 +609,10 @@ finds it.
 
 ## 6. Known defects
 
-- `cmd/demo` depends on `peerwire` and on `PackageSource.Get` returning
-  `[]byte`. It must be rewritten in §5.3, not deleted.
+- ~~`cmd/demo` depends on `peerwire` and on `PackageSource.Get` returning
+  `[]byte`.~~ **Fixed in §5.3.** It now runs the real v0.2 wire end to end:
+  `peer.Server` over `daemon.CacheSource`, fetched with `peer.FetchFromPeer`,
+  with no `[]byte` on either side.
 - **The daemon announces a serving port nothing listens on.** `daemon.go`
   announces `config.ServingPort()` and the keep-alive announces the whole cache,
   but no seed server is mounted and none can be until §5.3. Every peer acting on

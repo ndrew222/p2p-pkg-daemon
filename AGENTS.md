@@ -38,7 +38,7 @@ not implement from it, and do not cite it as a contract. The caveat that used
 to sit here — that its *Request surface* section was the only specification of
 the path rule — is discharged: ADR-004 is Approved and now carries that rule.
 
-Also deprecated: `internal/peerwire`, the interim length-prefixed binary framing for peer transfers, and its `MaxPayload` constant. It was explicitly a placeholder until the peer wire spec landed. That spec is now `docs/peer-transfer-spec-v0.2.md` and it chooses HTTP, so the package is to be deleted, not extended or chunked.
+**Deleted:** `internal/peerwire`, the interim length-prefixed binary framing for peer transfers, and its `MaxPayload` constant. It was explicitly a placeholder until the peer wire spec landed; that spec is `docs/peer-transfer-spec-v0.2.md`, it chooses HTTP, and the package went in the same change that replaced its size bound with the exact per-package one. Do not reintroduce it, and do not treat `MaxPayload` as a precedent — a global cap is forbidden outright, see the hard constraints below. The fuzzing obligation it carried now lives at `internal/peer/fuzz_test.go`, aimed at the seeder's HTTP surface end to end.
 
 ## Layout
 
