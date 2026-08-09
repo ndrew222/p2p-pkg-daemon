@@ -323,10 +323,14 @@ func (d *Daemon) startHTTPServerLocked() error {
 	// advisory, so the cost is at most one wasted transfer per bad peer,
 	// and end-to-end hash verification -- not the blacklist -- is what makes
 	// corrupt bytes impossible.
+	// UpstreamURL is what makes the facade able to answer at all when no peer
+	// can serve (ADR-003). It is required, has no default, and has had ${ABI}
+	// expanded against this host by the time we get here (ADR-006).
 	facade := &Facade{
-		Peers:   d.client,
-		Repo:    d.repository(),
-		TempDir: d.config.TempDir,
+		Peers:       d.client,
+		Repo:        d.repository(),
+		TempDir:     d.config.TempDir,
+		UpstreamURL: d.config.UpstreamURL,
 	}
 	if err := facade.Check(); err != nil {
 		return fmt.Errorf("mirror facade: %w", err)

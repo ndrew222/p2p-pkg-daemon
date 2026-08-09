@@ -210,6 +210,9 @@ func TestFacadeIsMountedOnFacadeAddr(t *testing.T) {
 			CacheDir:    cacheDir,
 			RepoDBDir:   repoDir,
 			TempDir:     t.TempDir(),
+			// Required since ADR-006, and the facade refuses to listen
+			// without it. Nothing in this test reaches it.
+			UpstreamURL: "http://127.0.0.1:1",
 		},
 		running: true,
 	}
