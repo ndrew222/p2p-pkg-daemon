@@ -76,17 +76,21 @@ package daemon
 // the 404 this file used to return for it failed every first-of-its-kind
 // install.
 //
-// There is no 500 in that table, and the omission is deliberate: a local spool
-// failure (peer.ErrSpool, an unwritable temp_dir) is a peer-PATH failure like
-// any other and goes to upstream, which does not touch temp_dir and can still
-// serve the request. ADR-003's governing rule is that an error reaches pkg only
-// when peers and upstream have both failed, and a broken temp_dir does not stop
-// upstream. **This is a live disagreement, recorded at HANDOFF §4.8(a) and
-// awaiting a ruling:** internal/peer's ErrSpool doc says the error is
-// distinguished "so the facade can answer 5xx", which is the opposite reading,
-// and §5.3's interim edit to this file did answer 500. The cost of the choice
-// made here is that a daemon whose temp_dir is broken degrades silently into a
-// plain proxy, which is why the log line for it is the loudest in the file.
+// There is no 500 in that table and there is not to be one: ADR-009 rules the
+// set above exhaustive. A local spool failure (peer.ErrSpool, an unwritable
+// temp_dir) is a peer-PATH failure like any other and goes to upstream, which
+// does not touch temp_dir and can still serve the request. ADR-003's governing
+// rule is that an error reaches pkg only when peers and upstream have both
+// failed, and a broken temp_dir does not stop upstream.
+//
+// This was a disagreement between two shipped components -- internal/peer's
+// ErrSpool doc said the opposite, and §5.3's interim edit to this file did
+// answer 500 -- recorded at HANDOFF §4.8(a) and ruled 2026-08-09 in this file's
+// favour. Both comments now agree and two tests pin it
+// (TestFacadeUnwritableTempDirGoesToUpstream, …WithNoUpstreamIs502). The
+// accepted cost is that a daemon whose temp_dir is broken degrades silently
+// into a plain proxy, which is why the log line for it is the loudest in the
+// file.
 //
 // There is no facade cache and there must not be one. Three documents forbid a
 // daemon-owned store (AGENTS.md's hard constraints, UC-02's assumptions,
@@ -344,13 +348,14 @@ func (f *Facade) servePeers(w http.ResponseWriter, r *http.Request, nameVersion 
 		// peer.ErrSpool -- an unwritable temp_dir -- which is this
 		// daemon's fault rather than any peer's, but is still not a
 		// reason to fail pkg: the upstream path does not touch temp_dir
-		// and can serve the request. See the note on ErrSpool below.
+		// and can serve the request (ADR-009).
 		//
 		// The two are named apart because they have opposite remedies:
 		// nobody nearby holding the package needs no action at all, and a
 		// broken temp_dir needs an operator. Under ADR-003 neither is
 		// visible to pkg, so this log is the only place the difference
-		// survives.
+		// survives -- which ADR-009 accepts explicitly, and is why the
+		// first branch shouts.
 		if errors.Is(err, peer.ErrSpool) {
 			log.Printf("facade: %q: PEER PATH DISABLED, this daemon cannot write temp_dir: %v; serving from upstream",
 				nameVersion, err)

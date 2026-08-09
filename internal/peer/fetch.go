@@ -61,8 +61,13 @@ var (
 
 	// ErrSpool is a LOCAL failure of the temp directory, not a peer's
 	// fault. It is distinguished so the fetch loop stops instead of
-	// blaming every holder in turn, and so the facade can answer 5xx --
-	// "this daemon is broken" -- rather than "no peer has it".
+	// blaming every holder in turn -- see download.go.
+	//
+	// It says nothing about what the CALLER should answer, and this comment
+	// used to: it claimed the facade answers 5xx to it, which contradicted
+	// the facade and was ruled against (ADR-009, HANDOFF §4.8(a)). The
+	// facade owns its status codes, an unwritable temp_dir disables the
+	// peer path and nothing else, and the upstream path does not spool.
 	ErrSpool = errors.New("peer: cannot spool the download to temp_dir")
 )
 

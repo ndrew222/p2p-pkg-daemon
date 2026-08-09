@@ -919,6 +919,11 @@ func TestFacadeUpstreamPathDoesNotTouchTempDir(t *testing.T) {
 // used to be a 500, which under ADR-003 is a code the facade is no longer
 // entitled to send: the upstream path does not touch temp_dir and can still
 // serve the request, and an error reaches pkg only when both sources are gone.
+//
+// RULED, ADR-009. §5.3 and §5.7 shipped opposite readings of peer.ErrSpool and
+// §4.8(a) recorded the disagreement; the owner made facade.go binding. These two
+// cases are what stop a later reader restoring the 500 from the other file's
+// comment.
 func TestFacadeUnwritableTempDirGoesToUpstream(t *testing.T) {
 	const pkgName = "nginx-1.24.0_2"
 	content := []byte("package bytes")
@@ -940,6 +945,29 @@ func TestFacadeUnwritableTempDirGoesToUpstream(t *testing.T) {
 	}
 	if len(up.requests()) != 1 {
 		t.Errorf("upstream saw %d requests, want 1", len(up.requests()))
+	}
+}
+
+// The other half of ADR-009: with the peer path disabled by an unwritable
+// temp_dir AND upstream unreachable, the answer is 502 -- "peers and upstream
+// both failed" -- and not 500. The facade has no way to say "this daemon is
+// broken" and does not acquire one just because both sources are gone.
+func TestFacadeUnwritableTempDirWithNoUpstreamIs502(t *testing.T) {
+	const pkgName = "nginx-1.24.0_2"
+	content := []byte("package bytes")
+
+	f := &Facade{
+		Peers:   fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
+		Repo:    fakeRepo{pkgName: {hash: sha256Hex(content), size: int64(len(content))}},
+		TempDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		// Nothing listens here.
+		UpstreamURL: "http://127.0.0.1:1",
+	}
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/latest/All/nginx-1.24.0_2.pkg", nil))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; 500 is not in the facade's status set (ADR-009)", rec.Code)
 	}
 }
 

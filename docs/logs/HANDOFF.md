@@ -521,12 +521,39 @@ inherited. Full reasoning in `docs/logs/claude-facade-rework.md`.
 
 | # | Call made | Why, and what overturning it costs |
 |---|---|---|
-| a | **`500` is no longer a facade status.** An unwritable `temp_dir` (`peer.ErrSpool`) used to be a `500`; it now falls through to upstream like any other peer-path failure. **§5.3 took the opposite view** — see below. | ADR-003's rebuilt table has no `500` row, and its governing rule says *every* peer-side failure goes to upstream and an error reaches pkg only when both sources are gone. The upstream path does not touch `temp_dir`, so it can still serve. Overturning it means pkg fails an install the daemon could have served, in exchange for a louder signal about a broken `temp_dir` — which is in the log either way. |
+| a | **`500` is no longer a facade status.** An unwritable `temp_dir` (`peer.ErrSpool`) used to be a `500`; it now falls through to upstream like any other peer-path failure. **§5.3 took the opposite view** — see below. **RULED 2026-08-09: upheld, and `docs/adr/adr-009-facade-status-set.md` makes it binding.** | ADR-003's rebuilt table has no `500` row, and its governing rule says *every* peer-side failure goes to upstream and an error reaches pkg only when both sources are gone. The upstream path does not touch `temp_dir`, so it can still serve. Overturning it means pkg fails an install the daemon could have served, in exchange for a louder signal about a broken `temp_dir` — which is in the log either way. |
 | b | **The query string is relayed** on the metadata branch. | Faithful relay of what pkg asked for. No ADR mentions queries and no measured pkg request carried one, so this is unobservable today; it costs nothing either way and is stated only because it is a difference between "relay the path" and "relay the request". |
 | c | **Exactly one request header is forwarded upstream** — `If-Modified-Since`, the one ADR-005 names. Not `User-Agent`, not `Accept-Encoding`, not `Range`. | Forwarding more is unspecified, and pkg 2.7.5 sends no `Range` and no `HEAD` (§7.3). The visible cost is that mirror operators see Go's default user-agent rather than pkg's, which matters if anyone is counting clients. |
 | d | **Transparent gzip is disabled on the upstream client.** | Left on, Go's transport adds its own `Accept-Encoding`, gunzips the response and drops `Content-Length` — so the facade would hand pkg bytes that are not the bytes upstream sent, which ADR-005's "unmodified" forbids and which on the package path could not match `packages.cksum`. The cost is that catalogue transfers are not compressed in transit. **§5.3 reached the same conclusion independently** on the peer wire, for the same reason. |
 
-#### (a) is a disagreement between two pieces of work, not just an unstated mechanism
+#### (a) was a disagreement between two pieces of work — **CLOSED (ADR-009)**
+
+**Ruled 2026-08-09: `facade.go` is binding.** `peer.ErrSpool` goes to upstream,
+`500` is not a facade status, and `docs/adr/adr-009-facade-status-set.md`
+(Approved) states the whole status set as exhaustive rather than exempting this
+one case — so a future condition that genuinely needs to tell pkg "this daemon
+is broken" needs an ADR reopening the table, not a spare `5xx`.
+
+Three things changed, and between them they are why this cannot quietly revert:
+
+- `internal/peer/fetch.go`'s `ErrSpool` comment no longer claims the facade
+  answers `5xx`. It keeps its real reason — the fetch loop stops rather than
+  blaming every holder for this daemon's fault — and says the caller owns the
+  status code.
+- `internal/daemon/facade.go`'s header cites ADR-009 instead of flagging an open
+  question.
+- Two tests pin the behaviour: `TestFacadeUnwritableTempDirGoesToUpstream`
+  (`200` from upstream) and `TestFacadeUnwritableTempDirWithNoUpstreamIs502`
+  (`502`, never `500`, when both sources are gone).
+
+The accepted cost, stated in ADR-009: a daemon with a broken `temp_dir` keeps
+installs working and stops participating in the swarm, and the log is the only
+signal. No alarm, health endpoint or startup probe was added to compensate —
+none is specified anywhere.
+
+The original statement of the problem follows.
+
+---
 
 Worth separating from the other three, because two shipped components now say
 opposite things and only one can be right.
