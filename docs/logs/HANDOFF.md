@@ -103,6 +103,7 @@ upstream can serve that package.
 | `docs/adr/adr-005-metadata-proxying.md` | **Approved.** The facade proxies non-package paths to the configured upstream and relays the response, including `304`. Closes §4.4; retires *"never proxies metadata"*. |
 | `docs/adr/adr-006-upstream-mirror-config.md` | **Approved and implemented** (the key, not its consumer). `upstream_url` in jmj's config: required, no default, `${ABI}` expanded at startup, plaintext warned not refused. Closes §4.5. |
 | `docs/adr/adr-007-repository-topology.md` | **Approved.** jmj fronts one repository, replaces that one, coexists with every other enabled repository. `upstream_url` stays singular. Closes §4.6; corrects a misreading of ADR-003 in §4.6 and ADR-006. |
+| `docs/adr/adr-008-repository-reload-trigger.md` | **Approved.** `fsnotify` on `repo_db_dir` triggers `Repositories.Reload`; directories watched not files, two-second settle, runtime failure keeps the old snapshot, a successful reload re-announces. Closes the §5.2 follow-up. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current **and implemented** (§5.3, mounted in §5.4). Its migration table and definition of done are both discharged. One self-contradiction is open with the owner — `400` vs `404` for a non-exact path; see §5.3. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
@@ -555,9 +556,17 @@ without knowing a choice was made.
 
 One follow-up remains: **nothing triggers `Reload()`**. `pkg update` rewrites the
 catalogues, so a long-running daemon goes stale and starts answering `404` for
-packages added since startup. `Reload()` exists and is tested; wiring a trigger
-is unclaimed. Choosing between a watch on `repo_db_dir` and a periodic reload is
-a design decision in no spec — **ask before picking**.
+packages added since startup — and under ADR-003 that `404` ends the install
+rather than falling through. `Reload()` exists and is tested; wiring a trigger
+was unclaimed.
+
+~~Choosing between a watch on `repo_db_dir` and a periodic reload is a design
+decision in no spec — **ask before picking**.~~ **Ruled 2026-08-09: `fsnotify`,
+recorded as `docs/adr/adr-008-repository-reload-trigger.md` (Approved).** The
+ADR also settles what is watched (directories, re-walked on every reload), the
+settle delay, that a runtime reload failure keeps the previous snapshot, and
+that a successful reload nudges a re-announce. Implementation is the remaining
+work.
 
 ### 5.3 Peer wire migration — **DONE**
 
