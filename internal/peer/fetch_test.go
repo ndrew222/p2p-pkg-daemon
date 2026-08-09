@@ -161,7 +161,11 @@ func TestRequesterRejections(t *testing.T) {
 		want            Want
 		wantErr         error
 		wantBlacklisted bool
-		wantBodyRead    bool // whether the peer was allowed to send a body at all
+		// wantRejectedBeforeTheBody asserts the peer never got to send
+		// a byte. Proved structurally: the fetch is repeated against a
+		// temp_dir that does not exist, and a run that had started
+		// spooling would fail with ErrSpool instead.
+		wantRejectedBeforeTheBody bool
 	}{
 		{
 			// Case 3.
@@ -173,7 +177,6 @@ func TestRequesterRejections(t *testing.T) {
 			want:            good,
 			wantErr:         ErrHashMismatch,
 			wantBlacklisted: true,
-			wantBodyRead:    true,
 		},
 		{
 			// Case 4: the body runs past the expected size. The
@@ -190,9 +193,8 @@ func TestRequesterRejections(t *testing.T) {
 					w.Write(content)
 				}
 			},
-			want:         good,
-			wantErr:      ErrSizeMismatch,
-			wantBodyRead: true,
+			want:    good,
+			wantErr: ErrSizeMismatch,
 		},
 		{
 			name: "a body shorter than the expected size is rejected",
@@ -200,9 +202,8 @@ func TestRequesterRejections(t *testing.T) {
 				w.Header().Set("Transfer-Encoding", "chunked")
 				w.Write(content[:5])
 			},
-			want:         good,
-			wantErr:      ErrSizeMismatch,
-			wantBodyRead: true,
+			want:    good,
+			wantErr: ErrSizeMismatch,
 		},
 		{
 			// Case 5. The peer never gets to send a byte: the
@@ -214,8 +215,9 @@ func TestRequesterRejections(t *testing.T) {
 				w.Header().Set("Content-Length", strconv.FormatInt(good.Size*1000, 10))
 				w.WriteHeader(http.StatusOK)
 			},
-			want:    good,
-			wantErr: ErrSizeMismatch,
+			want:                      good,
+			wantErr:                   ErrSizeMismatch,
+			wantRejectedBeforeTheBody: true,
 		},
 	}
 
@@ -247,6 +249,22 @@ func TestRequesterRejections(t *testing.T) {
 
 			if got := bl.Blocked(addr); got != tc.wantBlacklisted {
 				t.Errorf("blacklisted = %v, want %v; only a hash mismatch is a verdict about the peer", got, tc.wantBlacklisted)
+			}
+
+			if !tc.wantRejectedBeforeTheBody {
+				return
+			}
+			// Nothing may be spooled, because nothing may be read.
+			// A temp_dir that cannot be written to therefore makes
+			// no difference: reaching it at all would turn this
+			// into ErrSpool.
+			_, err = FetchFromPeer(context.Background(), addr, "nginx-1.24.0_2", tc.want,
+				filepath.Join(t.TempDir(), "does-not-exist"))
+			if errors.Is(err, ErrSpool) {
+				t.Error("the body was spooled before the Content-Length check; it must be rejected without reading a byte")
+			}
+			if !errors.Is(err, ErrSizeMismatch) {
+				t.Errorf("FetchFromPeer = %v, want ErrSizeMismatch", err)
 			}
 		})
 	}
