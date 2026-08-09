@@ -79,6 +79,16 @@ and the tracker never checks content. It is opened strictly read-only. Like
 read it will not start — without a catalogue it could verify nothing and would
 answer 404 to every request.
 
+`max_concurrent_seeds` and `max_concurrent_seeds_per_ip` bound how many peer
+transfers this daemon serves at once — in total, and to any one remote IP. Both
+default to `0`, meaning unlimited, which is the behaviour the daemon has always
+had; set them only if you have a reason to. When either is full the seeder
+answers `503` immediately: no queueing and no `Retry-After`, because the peer
+asking has other holders to try and pkg's own mirror behind those, so refusing
+fast is cheaper for them than waiting. The remote identity is the connection's
+source address and never a header. A per-IP cap larger than the global one can
+never fire, and jmj says so at startup rather than leaving you to wonder.
+
 Configs written for older builds are rejected with a message naming the key:
 `listen_addr` became `facade_addr` plus `serving_addr`, and `buffer_dir` became
 `temp_dir`. The file is left alone so you can edit it.

@@ -566,3 +566,105 @@ func TestExpandUpstream(t *testing.T) {
 		}
 	})
 }
+
+// --- ADR-002 seeding caps ----------------------------------------------------
+
+// The two key names are an owner ruling (HANDOFF §4.7); ADR-002 left them
+// unnamed. Pinning the JSON spelling here is what stops a later rename passing
+// review: a renamed key does not fail loudly, it silently reverts an operator's
+// cap to unlimited, which is the one outcome the cap exists to prevent.
+func TestSeedingCapKeyNamesAndDefaults(t *testing.T) {
+	if got := DefaultConfig().MaxConcurrentSeeds; got != 0 {
+		t.Errorf("default max_concurrent_seeds = %d, want 0 (unlimited)", got)
+	}
+	if got := DefaultConfig().MaxConcurrentSeedsPerIP; got != 0 {
+		t.Errorf("default max_concurrent_seeds_per_ip = %d, want 0 (unlimited)", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{"max_concurrent_seeds":8,"max_concurrent_seeds_per_ip":2}`
+	if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := read(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if cfg.MaxConcurrentSeeds != 8 {
+		t.Errorf("max_concurrent_seeds = %d, want 8", cfg.MaxConcurrentSeeds)
+	}
+	if cfg.MaxConcurrentSeedsPerIP != 2 {
+		t.Errorf("max_concurrent_seeds_per_ip = %d, want 2", cfg.MaxConcurrentSeedsPerIP)
+	}
+
+	// The generator's output must carry both keys under exactly those
+	// names, or a config round trip drops the operator's setting.
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"max_concurrent_seeds"`, `"max_concurrent_seeds_per_ip"`} {
+		if !strings.Contains(string(out), key) {
+			t.Errorf("generated config does not carry %s: %s", key, out)
+		}
+	}
+}
+
+// 0 already means unlimited, so a negative value is a mistake -- most likely
+// arithmetic that produced one -- and is reported rather than absorbed.
+func TestValidateFieldsRejectsNegativeSeedingCaps(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*DaemonConfig)
+		key  string
+	}{
+		{"global", func(c *DaemonConfig) { c.MaxConcurrentSeeds = -1 }, "max_concurrent_seeds"},
+		{"per ip", func(c *DaemonConfig) { c.MaxConcurrentSeedsPerIP = -1 }, "max_concurrent_seeds_per_ip"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig(t)
+			tc.set(cfg)
+			err := ValidateFields(cfg)
+			if err == nil {
+				t.Fatalf("ValidateFields() with a negative %s = nil, want an error", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error %q does not name %s", err, tc.key)
+			}
+		})
+	}
+}
+
+func TestValidateFieldsAcceptsSeedingCaps(t *testing.T) {
+	for _, tc := range []struct{ global, perIP int }{
+		{0, 0}, {8, 2}, {1, 1}, {0, 4}, {64, 0},
+	} {
+		cfg := validConfig(t)
+		cfg.MaxConcurrentSeeds = tc.global
+		cfg.MaxConcurrentSeedsPerIP = tc.perIP
+		if err := ValidateFields(cfg); err != nil {
+			t.Errorf("ValidateFields() with caps %d/%d = %v, want nil", tc.global, tc.perIP, err)
+		}
+	}
+}
+
+// ADR-002 requires diagnostics good enough to tell an attack from a
+// misconfigured ceiling. A per-IP cap above the global one can never fire, so
+// it is dead configuration and almost certainly transposed.
+func TestWarningsFlagsAPerIPCapThatCannotFire(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.MaxConcurrentSeeds = 2
+	cfg.MaxConcurrentSeedsPerIP = 8
+	got := Warnings(cfg)
+	if len(got) != 1 || !strings.Contains(got[0], "max_concurrent_seeds_per_ip") {
+		t.Errorf("Warnings() = %v, want one warning naming max_concurrent_seeds_per_ip", got)
+	}
+
+	// Unlimited globally is not a transposition: every per-IP value is
+	// meaningful under it.
+	cfg.MaxConcurrentSeeds = 0
+	if got := Warnings(cfg); len(got) != 0 {
+		t.Errorf("Warnings() with an unlimited global cap = %v, want none", got)
+	}
+}

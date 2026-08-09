@@ -201,7 +201,7 @@ ADR-002, the other two by the verification rulings. The numbers are retained
 because other documents cite them — §4.1 from `claude-config-schema.md` and
 `claude-verification-rulings.md`, §4.2 from **ADR-002 twice**, and §4.3 from
 `internal/daemon/facade.go:59` and `internal/daemon/repository.go:19`. **Do not
-reuse §4.1–§4.3 for new items.** New blockers take fresh numbers from §4.4.
+reuse §4.1–§4.3 for new items.** New blockers take fresh numbers from §4.8.
 
 ### 4.4 Does the facade proxy pkg's metadata? — **RULED. Yes.** (ADR-005)
 
@@ -453,6 +453,34 @@ upstream. `Repositories` will return a hash for a package belonging to a
 repository jmj does not front, which its `upstream_url` cannot serve. That path
 is unreachable under ADR-007 — pkg never asks — but a successful hash lookup is
 **not** proof the upstream will answer, and the rework must not assume it is.
+
+### 4.7 What the two ADR-002 config keys are called — **RULED** (owner, 2026-08-09)
+
+ADR-002 decided the mechanism — a global cap and a per-remote-IP cap, both
+non-blocking, both defaulting to `0` = unlimited, `503` when either is full —
+and deliberately left the two settings unnamed. §5.3 cannot write the mechanism
+without naming them, and inventing a config key is exactly what ground rule 3
+forbids, so this was put to the owner.
+
+**Ruled: `max_concurrent_seeds` and `max_concurrent_seeds_per_ip`.** Both `int`,
+both defaulting to `0` meaning unlimited, both in jmj's own config. **Do not
+rename them** — a rename does not fail loudly, it silently reverts an
+operator's cap to unlimited, which is the one outcome the cap exists to
+prevent.
+
+This section is the citable source, because ADR-002 is not: it rules on the
+mechanism and says nothing about spelling. `internal/config/config.go` and
+`internal/peer/serve.go` both cite §4.7.
+
+**Implemented** with §5.3. Negative values are refused (`0` already says
+unlimited, so a negative is a mistake), and a per-IP cap larger than the global
+one is warned about rather than corrected — it can never fire, so it is dead
+configuration and most likely a transposition, but which number the operator
+meant is not ours to guess.
+
+*Recorded by the implementing agent from the ruling as relayed, because the
+section it was cited to did not exist in the tree. The wording of the decision
+is the owner's; the surrounding prose is not.*
 
 ## 5. Work, in order
 
