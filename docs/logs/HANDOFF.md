@@ -76,15 +76,24 @@ ADR-007 (2026-08-08); §4.7, the two ADR-002 config key names, by owner ruling
 upheld and made binding by ADR-009, (c) overturned so that pkg's `User-Agent` is
 relayed, (b) and (d) ratified exactly as they shipped.
 
-**One thing is with the owner and nothing is blocked on it.** Raised
-implementing §5.3: the peer spec contradicts itself on whether a non-exact path
-is `400` or `404` — see §5.3 and `docs/logs/claude-peer-wire-v0.2.md`. It is a
-one-line change either way.
+**Three things are with the owner and nothing is blocked on any of them.**
 
-The remaining open items are **measurements, not rulings**, and all of them need
-the FreeBSD host: §7's two unknowns, the unfiled `mirror_type: http` bug report,
-and ADR-008's assumption that a `pkg update` produces filesystem events on
-`repo_db_dir` at all.
+- **§5.3** — the peer spec contradicts itself on whether a non-exact path is
+  `400` or `404`. One line either way; see `docs/logs/claude-peer-wire-v0.2.md`.
+- **§4.9** — one spurious catalogue reload per `pkg update`, found by
+  measurement on the host. Small fix, but it contradicts a sentence in ADR-008.
+- **§4.10** — jmj's own catalogue lands inside `repo_db_dir` and collides with
+  the upstream repository's on every row. Harmless today, a failure mode after a
+  repository rebuild.
+
+**The FreeBSD host round is done (2026-08-09) and closed nearly everything it
+was holding**: the suite passes on the target OS, ADR-008's platform assumption
+is confirmed by measurement, `pkg update` and a real `pkg install` work end to
+end through the facade, and the `mirror_type: http` bug report is complete and
+fileable. See §7.6–§7.9 and `docs/logs/claude-freebsd-host-round.md`. **The one
+thing still genuinely unproven is a two-machine trial** — everything measured so
+far is one host talking to itself over loopback, which exercises every code path
+and proves nothing about NAT, latency, or a peer that is not `127.0.0.1`.
 
 Read before touching the facade: ADR-003 (fetch semantics), ADR-004 (path
 rule), ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj
@@ -592,6 +601,66 @@ operator finds out immediately and every install fails until they fix it.
 disagree in comments, and a later reader may "fix" one to match the other
 without knowing a choice was made.
 
+### 4.9 One spurious catalogue reload per `pkg update` — **RAISED 2026-08-09**
+
+Found by measurement on the reference host, not by reading the code. Full data
+in `docs/logs/claude-freebsd-host-round.md` §2.
+
+`pkg update` touches `lock` and `meta` under `repo_db_dir`, then **goes quiet
+for 11.2 seconds** while it downloads, and only then rewrites the catalogue.
+ADR-008's two-second settle therefore fires inside that gap and reloads the
+*old* catalogue — completely and correctly, and pointlessly, since it was
+already loaded. The real rewrite follows and gets its own, useful reload.
+
+**Cost:** one wasted 38,052-row reload and one spurious re-announce per update.
+Not a correctness problem — the snapshot is right at the end either way, and the
+2s settle still cannot fire mid-rewrite (the largest gap inside a rewrite is
+0.48s, measured).
+
+**The fix is small:** do not arm the timer for events on `lock`, or arm it only
+for `db`. **It is not mine to make**, because ADR-008 states the opposite as a
+mechanism — *"Every event under `repo_db_dir` counts, whatever its op. The
+watcher does not try to tell a catalogue rewrite from a journal file being
+created"* — and that sentence was written deliberately, to avoid guessing at
+pkg's file layout. Narrowing it now would be guessing with better data, which is
+still a rule change.
+
+**Unblocks:** one sentence, plus an amendment to ADR-008's mechanism section.
+**Cost of leaving it:** a wasted reload per update, and a log line claiming a
+reload eleven seconds before anything changed, which will mislead somebody
+reading logs.
+
+### 4.10 jmj's own catalogue lands inside `repo_db_dir` — **RAISED 2026-08-09**
+
+Also from the host round, and it only appears in a real deployment: configuring
+jmj as a pkg repository makes pkg create `/var/db/pkg/repos/jmj/db` — **inside
+the directory jmj scans.** Measured with the stock repositories left enabled,
+which is ADR-007's coexistence:
+
+```
+daemon: loaded 37813 package(s) from /var/db/pkg/repos/jmj/db
+daemon: 37813 name-version(s) appear in more than one repository;
+        the first in path order won: 0ad-0.28.0_4, … and 37803 more
+```
+
+Nothing broke. The collision resolution is deterministic and already ratified,
+`FreeBSD-ports` sorts first, and both catalogues came from the same upstream so
+their hashes agree.
+
+**The risk is drift.** The two catalogues are fetched at different times — jmj's
+through the facade, `FreeBSD-ports`'s directly — so they can hold different
+`pkgsize`/`cksum` for the same name-version after a repository rebuild (which
+§4.9's round measured happening: 16 of 20 cached packages changed size with no
+version bump). Path order would then verify pkg's bytes against the *other*
+repository's row. That degrades to a failed install, never a corrupt one — UC-02
+§10 has pkg re-verify — but it is a failure mode nothing currently anticipates.
+
+Options, none obviously right: ignore a catalogue whose `repodata` source URL is
+our own `upstream_url`; make the daemon skip a repository directory named in
+config; do nothing and document it. **What it needs:** a ruling. **Cost of
+leaving it:** a rare, confusing install failure after a rebuild, on exactly the
+hosts that adopted jmj.
+
 ## 5. Work, in order
 
 ### 5.1 Config schema — **DONE**
@@ -829,22 +898,70 @@ UC-02 work. Summary only:
 5. **Cache layout after a real install?** Matches the earlier `pkg fetch -o`
    probe; the cache stays flat. Closes §5.6.
 
-Remaining unknowns, both minor: whether `cksum` is ever not sha256-hex (38,074
-rows checked across both repositories, zero exceptions; residual risk is one
-*host*, not one repository), and where the tracker runs for a real two-machine
-trial.
+~~Remaining unknowns, both minor: whether `cksum` is ever not sha256-hex~~
+**Closed by §7.6 below.** One unknown remains: where the tracker runs for a real
+two-machine trial.
+
+### §7.6–§7.9 — the host round, 2026-08-09 — **ANSWERED**
+
+Full evidence: **`docs/logs/claude-freebsd-host-round.md`**. Summary only.
+
+6. **Is `cksum` ever not sha256-hex? No, on a second host.** All 38,052 rows of
+   both catalogues checked independently of the daemon: zero bad `cksum`, zero
+   non-positive `pkgsize`. The residual risk was always one host rather than one
+   repository, and this is one more host with no exceptions.
+7. **What does `pkg update` do to `repo_db_dir`?** **21,650 events**, and the
+   catalogue is **replaced by a rename**. A watch on the `db` file itself fired
+   exactly twice in the whole run — the rename — and then went permanently deaf,
+   while the directory watch saw all ~21,600 subsequent writes. ADR-008's
+   directory-watching decision is confirmed by measurement rather than argument,
+   and it was not a marginal call. The largest gap *inside* a rewrite is 0.48s,
+   so the two-second settle cannot fire mid-write. One spurious reload per
+   update — §4.9.
+8. **Does the whole thing work against a real pkg? Yes, end to end.**
+   `pkg update` through the facade processed 37,813 packages with
+   `signature_type: fingerprints` intact; `If-Modified-Since`/`304` relayed;
+   a peer hit served 4,842,922 verified bytes from the cache over the peer wire;
+   a peer miss went to upstream; `404` and `400` as specified; **`pkg install -y
+   -r jmj tree` exited 0**; and the cache watcher took the announce from 4 to 5
+   packages unprompted. `temp_dir` was empty afterwards. One deployment finding —
+   §4.10.
+9. **A host's shareable set decays as the repository is rebuilt.** Measured: 16
+   of 20 cached packages had a `pkgsize` differing from the catalogue's by tens
+   to a few thousand bytes, **same name-version, no version bump**, so only 4
+   were announceable. `SanityFilter` is what stops those being announced and
+   wasting a peer's transfer. Nothing in the design documents anticipates this
+   decay, and it bounds how much a swarm can actually share.
+
+**The `mirror_type: http` bug report is complete and fileable** —
+`docs/logs/freebsd-bug-report-pkg-mirror-type-http.md`. The child core's
+backtrace puts the fault in **`fetchFreeURL` ← `libfetch_open`**, with frame 0
+inside libc's allocator, on the first fetch after the mirror list is parsed.
+Both isolation runs are done: `signature_type: none` still crashes, and a stock
+`python3 -m http.server` still crashes, which exonerates §7's purpose-built
+probe entirely. It also reproduces with jmj not running.
 
 **Host access:** the owner has an SSH-accessible FreeBSD 15.1-RELEASE-p1 /
 pkg 2.7.5 box and holds the address. *(Deliberately not recorded here — this
 repository is public. Ask the owner.)* The host was returned to a verified clean
-baseline after the §7 run; a `pkg.core` was left in place as evidence.
+baseline after the §7 run and again after the 2026-08-09 round; a `pkg.core` was
+left in place as evidence, and `/root/cores/` now holds two more.
 
-**A draft FreeBSD bug report exists** for the `mirror_type: http` segfault, not
-yet filed. Before filing it needs: the **child** process's core — the parent's
-core is only a signal re-raise and has no diagnostic value — captured via
-`sysctl kern.corefile='%N.%P.core'`; and two isolation runs, one with
-`signature_type: none` and one serving the mirror list from a stock web server
-rather than a purpose-built one.
+**Working there costs nothing in setup.** The whole module cross-compiles —
+`GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0` — because `modernc.org/sqlite` is pure
+Go and `fsnotify` has a kqueue backend, and there are no `testdata` directories
+or `exec.Command` calls in any test, so `go test -c` binaries are
+self-contained. The host needs no Go toolchain and no source. `-race` is the one
+exception: it needs cgo and a FreeBSD C toolchain, so it cannot be
+cross-compiled and stays a Linux gate.
+
+~~**A draft FreeBSD bug report exists** for the `mirror_type: http` segfault,
+not yet filed. Before filing it needs: the **child** process's core … and two
+isolation runs.~~ **All three are done (2026-08-09).** The report is complete
+and fileable at `docs/logs/freebsd-bug-report-pkg-mirror-type-http.md`: the
+child core's backtrace puts the fault in `fetchFreeURL` ← `libfetch_open`, and
+both isolation runs still crash. Filing it needs a Bugzilla account, which is
+why it is the owner's step and not this session's.
 
 ## 8. Traps
 
@@ -892,6 +1009,23 @@ Added 2026-08-08, from the §7 work:
   working package manager until the file is removed.
 - **Verify teardown and "it's clean now" claims against the host yourself.** It
   is three read-only commands, and a report is not evidence.
+
+Added 2026-08-09, from the host round:
+
+- **`pkg rquery "%sb"` is flatsize, not `pkgsize`.** It reports the *installed*
+  size, so comparing a cached `.pkg` against it makes every package look
+  mismatched by 3–6× and invents a defect that is not there. The size jmj
+  verifies against is the `pkgsize` column, and reading it means reading the
+  catalogue directly.
+- **A cached package can stop matching its own catalogue entry with no version
+  change.** The repository is rebuilt and `pkgsize`/`cksum` move under the same
+  name-version; measured at 16 of 20 cached packages on the reference host.
+  `SanityFilter` is what keeps those out of the announce, and a change that
+  "optimises" it away would have peers fetching bytes that cannot verify.
+- **Do not watch the `db` files.** Measured: a catalogue rewrite renames the
+  file, so a watch on it fires once and then goes permanently deaf while ~21,600
+  subsequent writes go unseen. Watch directories. This is ADR-008 and it now has
+  evidence, not just an argument.
 
 ## Suggested skills
 
