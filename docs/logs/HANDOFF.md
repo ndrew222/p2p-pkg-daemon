@@ -66,21 +66,25 @@ into it. *(This line used to pin a commit hash, which went stale at every merge
 and twice told a new agent the tree was further behind than it was. Run
 `git log --oneline -5` instead — it is authoritative and this line cannot be.)*
 
-ADR-001 through -007 are all Approved. **§5.3 (the peer wire migration and the
-cache-backed seeder), §5.4 (mounting both servers) and §5.7 (the facade
-rework) are all done.** There is no large open work item.
+ADR-001 through -009 are all Approved. **§5.2 (the reload trigger), §5.3 (the
+peer wire migration and the cache-backed seeder), §5.4 (mounting both servers)
+and §5.7 (the facade rework) are all done.** There is no large open work item.
 
-**§4.4, §4.5 and §4.6 are all closed** (ADR-005, ADR-006 and ADR-007, ruled
-2026-08-08) and **§4.7 is ruled** (the two ADR-002 config key names,
-2026-08-09).
+**Every item in §4 is closed.** §4.4, §4.5 and §4.6 by ADR-005, ADR-006 and
+ADR-007 (2026-08-08); §4.7, the two ADR-002 config key names, by owner ruling
+(2026-08-09); and **all four of §4.8's judgement calls ruled 2026-08-09** — (a)
+upheld and made binding by ADR-009, (c) overturned so that pkg's `User-Agent` is
+relayed, (b) and (d) ratified exactly as they shipped.
 
-**Two things are with the owner, and nothing is blocked on either.** Raised
+**One thing is with the owner and nothing is blocked on it.** Raised
 implementing §5.3: the peer spec contradicts itself on whether a non-exact path
-is `400` or `404` — see §5.3 and `docs/logs/claude-peer-wire-v0.2.md`. Raised by
-§5.7: four judgement calls awaiting ratification, at **§4.8**. One of those,
-§4.8(a), is a **direct disagreement between the two pieces of work** — whether
-an unwritable `temp_dir` is a `500` to pkg or a fall-through to upstream — and
-it is the one worth reading first.
+is `400` or `404` — see §5.3 and `docs/logs/claude-peer-wire-v0.2.md`. It is a
+one-line change either way.
+
+The remaining open items are **measurements, not rulings**, and all of them need
+the FreeBSD host: §7's two unknowns, the unfiled `mirror_type: http` bug report,
+and ADR-008's assumption that a `pkg update` produces filesystem events on
+`repo_db_dir` at all.
 
 Read before touching the facade: ADR-003 (fetch semantics), ADR-004 (path
 rule), ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj
@@ -511,20 +515,32 @@ one is warned about rather than corrected — it can never fire, so it is dead
 configuration and most likely a transposition, but which number the operator
 meant is not ours to guess.
 
-### 4.8 Four judgement calls the §5.7 rework made — **awaiting ratification**
+### 4.8 Four judgement calls the §5.7 rework made — **ALL FOUR RULED 2026-08-09**
 
-Raised 2026-08-09 by the facade rework. **None of these blocks anything** and
-none of them is a silent resolution of a stated ambiguity: each is a place
-where the ADRs settle the *rule* and leave a mechanism detail unstated, and the
-choice made is recorded here so it is ratified or overturned rather than
-inherited. Full reasoning in `docs/logs/claude-facade-rework.md`.
+Raised 2026-08-09 by the facade rework and ruled the same day. **None of these
+blocked anything** and none was a silent resolution of a stated ambiguity: each
+was a place where the ADRs settle the *rule* and leave a mechanism detail
+unstated, and the choice made was recorded here so it could be ratified or
+overturned rather than inherited. Full reasoning in
+`docs/logs/claude-facade-rework.md`; the rulings in
+`docs/logs/claude-facade-ratifications.md`.
+
+The outcome, and it is worth noting that recording them was not a formality —
+one of the four was overturned:
+
+| # | Ruling |
+|---|---|
+| a | **Upheld and made binding.** `docs/adr/adr-009-facade-status-set.md` (Approved). |
+| b | **Ratified as shipped.** The query string is relayed. No code change. |
+| c | **Overturned.** `User-Agent` is relayed too, on both paths. |
+| d | **Ratified as shipped.** Transparent gzip stays disabled. No code change. |
 
 | # | Call made | Why, and what overturning it costs |
 |---|---|---|
 | a | **`500` is no longer a facade status.** An unwritable `temp_dir` (`peer.ErrSpool`) used to be a `500`; it now falls through to upstream like any other peer-path failure. **§5.3 took the opposite view** — see below. **RULED 2026-08-09: upheld, and `docs/adr/adr-009-facade-status-set.md` makes it binding.** | ADR-003's rebuilt table has no `500` row, and its governing rule says *every* peer-side failure goes to upstream and an error reaches pkg only when both sources are gone. The upstream path does not touch `temp_dir`, so it can still serve. Overturning it means pkg fails an install the daemon could have served, in exchange for a louder signal about a broken `temp_dir` — which is in the log either way. |
-| b | **The query string is relayed** on the metadata branch. | Faithful relay of what pkg asked for. No ADR mentions queries and no measured pkg request carried one, so this is unobservable today; it costs nothing either way and is stated only because it is a difference between "relay the path" and "relay the request". |
+| b | **The query string is relayed** on the metadata branch. **RATIFIED 2026-08-09 as shipped** — the branch relays the *request*, not merely the path. No code change. | Faithful relay of what pkg asked for. No ADR mentions queries and no measured pkg request carried one, so this is unobservable today; it costs nothing either way and is stated only because it is a difference between "relay the path" and "relay the request". Note the asymmetry that survives: the **package** path drops the query (`facade.go` passes `""`), because a package request is reduced to a validated name-version before anything is fetched and relaying a query on it would make the upstream request differ from what a peer was asked for. |
 | c | ~~**Exactly one request header is forwarded upstream** — `If-Modified-Since`, the one ADR-005 names. Not `User-Agent`, not `Accept-Encoding`, not `Range`.~~ **OVERTURNED 2026-08-09: `User-Agent` is relayed verbatim too**, on both the metadata and the upstream-package paths, and suppressed entirely when pkg sent none rather than falling back to Go's default. | The cost recorded here was real — mirror operators saw Go's default rather than pkg's — and the owner ruled the facade should present as the pkg client it is fronting. Relaying beats hardcoding because there are **two** measured strings, not one: `pkg/2.7.5` on catalogue requests and `fetch libfetch/2.0` on package fetches (§7.3). A relayed header invents nothing and goes stale with nothing. It reaches the package path as well as the metadata path because it does not change the bytes, so the peer-versus-upstream symmetry argument that keeps `If-Modified-Since` off that path does not apply to it. `TestFacadeRelaysTheUserAgent`. `Range` and `Accept-Encoding` stay unforwarded — see (d). |
-| d | **Transparent gzip is disabled on the upstream client.** | Left on, Go's transport adds its own `Accept-Encoding`, gunzips the response and drops `Content-Length` — so the facade would hand pkg bytes that are not the bytes upstream sent, which ADR-005's "unmodified" forbids and which on the package path could not match `packages.cksum`. The cost is that catalogue transfers are not compressed in transit. **§5.3 reached the same conclusion independently** on the peer wire, for the same reason. |
+| d | **Transparent gzip is disabled on the upstream client.** **RATIFIED 2026-08-09 as shipped.** No code change. | Left on, Go's transport adds its own `Accept-Encoding`, gunzips the response and drops `Content-Length` — so the facade would hand pkg bytes that are not the bytes upstream sent, which ADR-005's "unmodified" forbids and which on the package path could not match `packages.cksum`. The cost is that catalogue transfers are not compressed in transit. **§5.3 reached the same conclusion independently** on the peer wire, for the same reason. |
 
 #### (a) was a disagreement between two pieces of work — **CLOSED (ADR-009)**
 
