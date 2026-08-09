@@ -665,11 +665,12 @@ appears in commit messages and finds nothing now.)
   and it must relay from upstream instead. The
   tests that encode the refusal (`facade_test.go:91`, `:189`, `:354`, and
   `daemon_test.go:187`, which uses a metadata path as its probe) go with it.
-- **The facade has no answer for `If-Modified-Since`.** pkg sends conditional
-  `GET`s for catalogue files. Ignoring the header wastes catalogue bandwidth on
-  every `pkg update`; answering `304` from a guess would serve a stale
-  catalogue. ADR-003's proxying resolves this for free and ADR-005 now requires
-  the relay explicitly, but it is unimplemented.
+- ~~**The facade has no answer for `If-Modified-Since`.**~~ **FIXED** as part of
+  §5.7's metadata branch. pkg's conditional `GET` is forwarded to the upstream
+  mirror and upstream's `304` is relayed unchanged, never synthesised — the
+  daemon tracks no upstream modification times, and a guess would serve a stale
+  catalogue. Tested at `facade_test.go`'s
+  `TestFacadeRelaysConditionalGetAnd304`.
 
 ## 7. Empirical findings — §7.1–§7.5 are ANSWERED
 

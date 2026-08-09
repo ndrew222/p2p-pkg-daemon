@@ -38,6 +38,25 @@ package daemon
 // The asymmetry is ADR-003's and it is the point. Do not make the two paths
 // symmetrical in either direction.
 //
+// Everything that is NOT a package request is relayed from the same upstream
+// (ADR-005, UC-07): streamed, uncached, unverified, unmodified, with pkg's
+// If-Modified-Since forwarded and upstream's status — including 304 — relayed
+// unchanged. Relaying is not vouching. The bytes originate at the real mirror,
+// the facade asserts nothing about them, and pkg verifies the repository
+// signature itself against its own fingerprints; that is why "the signed
+// catalogue comes from a real mirror" survives while "the daemon never proxies
+// metadata" does not. There is in any case nothing the facade COULD verify a
+// catalogue against: the repository database carries no hash for one, and is
+// itself the thing being updated. A 304 is never synthesised — the daemon
+// tracks no upstream modification times, and a wrong guess serves pkg a stale
+// catalogue.
+//
+// This makes the facade a general reverse proxy for non-package paths, and
+// facade_addr's loopback enforcement (config.ValidateFields, which refuses to
+// start otherwise) is what keeps that from being an open proxy for whoever
+// finds the port. It was already load-bearing when only package bytes were
+// relayed; ADR-005 widened the surface it protects. DO NOT RELAX IT.
+//
 // Status codes — ADR-003's rebuilt table. The deprecated spec's is retired:
 //
 //	200  peer bytes, hash-verified                        UC-02 §10
@@ -46,6 +65,8 @@ package daemon
 //	404  ONLY: provably absent from the repository DB     ADR-003
 //	405  anything but GET                                 ADR-004
 //	502  ONLY: peers AND upstream both failed             UC-02 §9g–10g
+//	···  a non-package path answers with upstream's own
+//	     status, relayed (200 / 304 / 404 / …)            ADR-005
 //
 // Four conditions the old table answered separately — tracker unreachable,
 // empty peer list, every holder blacklisted, every holder tried and failed —
@@ -85,10 +106,6 @@ package daemon
 // The path rule is ADR-004's, is measured against pkg 2.7.5, and is unaffected
 // by any of the above. watcher.go, repodb.go and three test files depend on
 // it. Do not "fix" it while you are in here.
-//
-// TODO (HANDOFF §6, ADR-005): the non-package branch still answers 404 and
-// must relay from upstream instead — a 404 there breaks `pkg update` outright
-// (§7.1). It is the remaining half of §5.7.
 
 import (
 	"crypto/sha256"
@@ -188,7 +205,19 @@ type Facade struct {
 // One shared client, so connections are reused: catalogue traffic is pure
 // pass-through that the swarm never reduces, and reconnecting per request
 // would add to the one cost ADR-005 asks us to keep small.
-var upstreamClient = &http.Client{}
+//
+// Transparent compression is off. Left on, the transport adds its own
+// Accept-Encoding, silently gunzips what comes back and drops Content-Length
+// with it -- so the facade would relay bytes that are not the bytes upstream
+// sent, which is precisely what ADR-005's "unmodified" forbids, and on the
+// package path would produce a body that cannot match packages.cksum.
+var upstreamClient = &http.Client{Transport: upstreamTransport()}
+
+func upstreamTransport() http.RoundTripper {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DisableCompression = true
+	return t
+}
 
 // ServeHTTP implements http.Handler.
 func (f *Facade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -203,10 +232,12 @@ func (f *Facade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	nameVersion, ok := packageRequest(r.URL.Path)
 	if !ok {
-		// TODO (HANDOFF §6, ADR-005): relay this from upstream. Refusing it
-		// breaks `pkg update` outright -- there is no next mirror to fetch
-		// the catalogue from (§7.1).
-		httpError(w, http.StatusNotFound, "not a package path; this mirror serves package files only")
+		// UC-07: meta.conf, packagesite.pkg, data.pkg, directory listings,
+		// "/", anything not All/[Hashed/]<name-version>.pkg. Relayed from
+		// upstream (ADR-005). This branch used to answer 404, which §7.1
+		// measured breaks `pkg update` outright -- there is no next mirror
+		// to fetch the catalogue from.
+		f.relayUpstream(w, r)
 		return
 	}
 	if nameVersion == "" {
@@ -408,14 +439,99 @@ func (f *Facade) serveUpstreamPackage(w http.ResponseWriter, r *http.Request, na
 	}
 }
 
+// relayUpstream is UC-07: fetch a non-package path from the configured
+// upstream mirror and relay the answer to pkg.
+//
+// Streamed, uncached, unverified, unmodified (ADR-005). The status is
+// upstream's own — a 404 for a catalogue file is upstream's answer and reaches
+// pkg as such, because the facade has no standing to reinterpret it. The
+// facade emits its own code in exactly one case: the fetch itself failed, and
+// then it is ADR-003's 502, which is terminal. There is no next mirror, so
+// `pkg update` fails outright — not a new cost, since §7.1 measured that an
+// unreachable facade already breaks it.
+//
+// A 304 is relayed, never synthesised, and carries no body (RFC 9110 §15.4.5).
+// It is not an optimisation: catalogue traffic is pure pass-through that the
+// swarm never reduces, so the conditional GET is the only thing keeping the
+// cost of being pkg's only mirror small.
+func (f *Facade) relayUpstream(w http.ResponseWriter, r *http.Request) {
+	resp, err := f.fetchUpstream(r, r.URL.Path, r.URL.RawQuery, true)
+	if err != nil {
+		log.Printf("facade: %s: upstream: %v", r.URL.Path, err)
+		httpError(w, http.StatusBadGateway, "upstream mirror could not be reached")
+		return
+	}
+	defer resp.Body.Close()
+
+	relayHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+
+	if resp.StatusCode == http.StatusNotModified {
+		log.Printf("facade: relayed 304 for %s", r.URL.Path)
+		return
+	}
+	n, err := io.Copy(w, resp.Body)
+	if err != nil {
+		log.Printf("facade: %s: relay failed after %d bytes: %v", r.URL.Path, n, err)
+		return
+	}
+	log.Printf("facade: relayed %s for %s (%d bytes)", resp.Status, r.URL.Path, n)
+}
+
+// hopByHopHeaders are the headers that belong to one connection and must not
+// be forwarded across a relay (RFC 9110 §7.6.1). Not a design decision --
+// ordinary HTTP correctness. Content-Length and Last-Modified are NOT here:
+// pkg needs both, the second so that its next conditional GET has something to
+// be conditional about.
+var hopByHopHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Proxy-Connection",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+// relayHeaders copies upstream's response headers to pkg, minus the ones that
+// describe the upstream connection rather than the resource.
+func relayHeaders(dst, src http.Header) {
+	drop := make(map[string]bool, len(hopByHopHeaders))
+	for _, h := range hopByHopHeaders {
+		drop[http.CanonicalHeaderKey(h)] = true
+	}
+	// Connection names further headers that are hop-by-hop for this message.
+	for _, value := range src.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				drop[http.CanonicalHeaderKey(name)] = true
+			}
+		}
+	}
+	for name, values := range src {
+		if drop[http.CanonicalHeaderKey(name)] {
+			continue
+		}
+		for _, v := range values {
+			dst.Add(name, v)
+		}
+	}
+}
+
 // fetchUpstream issues the one GET the facade makes on pkg's behalf.
 //
 // The request context is pkg's, so a client that hangs up cancels the upstream
-// fetch rather than leaving it running against the mirror. conditional
-// forwards pkg's If-Modified-Since (ADR-005); the package path never sets it,
-// because the facade must answer a package request identically whether the
-// bytes come from a peer or from upstream, and a peer cannot honour a
-// conditional GET.
+// fetch rather than leaving it running against the mirror.
+//
+// One request header crosses the boundary and only one: If-Modified-Since,
+// which ADR-005 names. The package path does not even send that, because the
+// facade must answer a package request identically whether the bytes come from
+// a peer or from upstream and a peer cannot honour a conditional GET.
+// Forwarding anything further is unspecified, so it is not done -- measured,
+// pkg 2.7.5 sends no Range and no HEAD (§7.3), so there is nothing else the
+// mirror needs to hear from pkg.
 func (f *Facade) fetchUpstream(r *http.Request, reqPath, rawQuery string, conditional bool) (*http.Response, error) {
 	target, err := upstreamURL(f.UpstreamURL, reqPath, rawQuery)
 	if err != nil {

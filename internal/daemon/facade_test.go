@@ -376,10 +376,11 @@ func TestFacadeStatusCodes(t *testing.T) {
 			wantCode: http.StatusOK, wantBody: string(peerContent), wantUpstream: 0,
 		},
 		{
-			// TODO (§5.7, ADR-005): this must become a relay, not a refusal.
+			// ADR-005: relayed, not refused. The 404 this used to answer
+			// breaks `pkg update` outright (§7.1).
 			name: "metadata path", method: http.MethodGet, path: "/stable/FreeBSD:15:amd64/latest/meta.conf",
 			lister: fakeLister{addrs: []string{goodPeer}}, repo: repo,
-			wantCode: http.StatusNotFound,
+			wantCode: http.StatusOK, wantBody: string(upstreamContent), wantUpstream: 1,
 		},
 		{
 			name: "malformed name-version", method: http.MethodGet, path: "/latest/All/nginx.pkg",
@@ -494,6 +495,167 @@ func TestFacadeStatusCodes(t *testing.T) {
 				t.Errorf("body = %q, want %q", body, tc.wantBody)
 			}
 		})
+	}
+}
+
+// --- the metadata branch (ADR-005, UC-07) -----------------------------------
+
+// The catalogue is what `pkg update` fetches, and it is the one thing the
+// facade cannot answer from itself: the repository database carries no hash
+// for it, and is itself the thing being updated. So it is relayed -- and
+// relaying is not vouching, because pkg checks the repository signature
+// against its own fingerprints.
+func TestFacadeRelaysMetadataFromUpstream(t *testing.T) {
+	const catalogue = "signed catalogue bytes"
+	const lastModified = "Thu, 06 Aug 2026 18:39:36 GMT"
+
+	up := startUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-xz")
+		w.Header().Set("Last-Modified", lastModified)
+		_, _ = io.WriteString(w, catalogue)
+	})
+	f := &Facade{
+		Peers:       fakeLister{addrs: []string{"127.0.0.1:1"}},
+		Repo:        fakeRepo{},
+		UpstreamURL: up.URL + "/FreeBSD:15:amd64/quarterly",
+	}
+
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/packagesite.pkg", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != catalogue {
+		t.Errorf("body = %q, want the upstream bytes %q", got, catalogue)
+	}
+	// Relayed unmodified: pkg needs the content type, and needs
+	// Last-Modified so its NEXT request can be conditional.
+	if got := rec.Header().Get("Content-Type"); got != "application/x-xz" {
+		t.Errorf("Content-Type = %q, want it relayed unchanged", got)
+	}
+	if got := rec.Header().Get("Last-Modified"); got != lastModified {
+		t.Errorf("Last-Modified = %q, want %q", got, lastModified)
+	}
+
+	got := up.requests()
+	if len(got) != 1 {
+		t.Fatalf("upstream saw %d requests, want 1", len(got))
+	}
+	if want := "/FreeBSD:15:amd64/quarterly/packagesite.pkg"; got[0].Path != want {
+		t.Errorf("upstream path = %q, want %q", got[0].Path, want)
+	}
+}
+
+// pkg sends conditional GETs for catalogue files (measured, §7.3). ADR-005
+// requires the header to be forwarded and the 304 to be RELAYED, never
+// synthesised: the daemon tracks no upstream modification times, and a guess
+// serves a stale catalogue. Without this, every `pkg update` re-downloads a
+// catalogue the swarm cannot help with.
+func TestFacadeRelaysConditionalGetAnd304(t *testing.T) {
+	const ims = "Thu, 06 Aug 2026 18:39:36 GMT"
+
+	up := startUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-Modified-Since") == ims {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = io.WriteString(w, "a whole catalogue nobody needed")
+	})
+	f := &Facade{Peers: fakeLister{}, Repo: fakeRepo{}, UpstreamURL: up.URL}
+
+	req := httptest.NewRequest(http.MethodGet, "/meta.conf", nil)
+	req.Header.Set("If-Modified-Since", ims)
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", rec.Code)
+	}
+	if body := rec.Body.String(); body != "" {
+		t.Errorf("304 carried a %d-byte body (%q); RFC 9110 §15.4.5 forbids one", len(body), body)
+	}
+	if got := up.requests(); len(got) != 1 || got[0].IMS != ims {
+		t.Errorf("upstream saw %+v, want one request carrying If-Modified-Since", got)
+	}
+}
+
+// Upstream's status is upstream's answer. The facade has no standing to
+// reinterpret a 404 on a catalogue path as anything else, and turning it into
+// a 502 would tell pkg the mirror is broken when it is merely saying no.
+func TestFacadeRelaysUpstreamStatusForMetadata(t *testing.T) {
+	up := startUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no such file", http.StatusNotFound)
+	})
+	f := &Facade{Peers: fakeLister{}, Repo: fakeRepo{}, UpstreamURL: up.URL}
+
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/no-such-catalogue", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want upstream's own 404 relayed", rec.Code)
+	}
+}
+
+// The facade's own code, and the only one it may send on this branch: the
+// fetch itself failed. Terminal -- there is no next mirror, so `pkg update`
+// fails outright (UC-07 error state 1).
+func TestFacadeMetadataRelayFailureIs502(t *testing.T) {
+	f := &Facade{Peers: fakeLister{}, Repo: fakeRepo{}, UpstreamURL: "http://127.0.0.1:1"}
+
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta.conf", nil))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rec.Code)
+	}
+}
+
+// No spool and no cache on this branch either: the catalogue is large, the
+// reference host has 1 GiB, and there is nothing to withhold bytes for.
+func TestFacadeRelayDoesNotSpoolOrCache(t *testing.T) {
+	tempDir := t.TempDir()
+	up := startUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "catalogue")
+	})
+	f := &Facade{Peers: fakeLister{}, Repo: fakeRepo{}, TempDir: tempDir, UpstreamURL: up.URL}
+
+	for i := range 2 {
+		rec := httptest.NewRecorder()
+		f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/packagesite.pkg", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i+1, rec.Code)
+		}
+	}
+	if got := len(up.requests()); got != 2 {
+		t.Errorf("upstream saw %d requests, want 2 -- the facade must hold no cache", got)
+	}
+	assertEmptyDir(t, tempDir)
+}
+
+// Hop-by-hop headers describe one connection, not the resource, and must not
+// cross the relay (RFC 9110 §7.6.1) -- including the ones upstream names in its
+// own Connection header.
+func TestFacadeRelayDropsHopByHopHeaders(t *testing.T) {
+	up := startUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "X-Mirror-Private")
+		w.Header().Set("X-Mirror-Private", "internal")
+		w.Header().Set("Keep-Alive", "timeout=5")
+		w.Header().Set("X-Mirror-Public", "kept")
+		_, _ = io.WriteString(w, "catalogue")
+	})
+	f := &Facade{Peers: fakeLister{}, Repo: fakeRepo{}, UpstreamURL: up.URL}
+
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta.conf", nil))
+
+	for _, h := range []string{"Connection", "Keep-Alive", "X-Mirror-Private"} {
+		if got := rec.Header().Get(h); got != "" {
+			t.Errorf("%s = %q, want it dropped at the relay", h, got)
+		}
+	}
+	if got := rec.Header().Get("X-Mirror-Public"); got != "kept" {
+		t.Errorf("X-Mirror-Public = %q, want it relayed", got)
 	}
 }
 
@@ -651,8 +813,9 @@ func TestFacadeOverRealHTTP(t *testing.T) {
 	const pkgName = "nginx-1.24.0_2"
 	content := []byte("package bytes over the wire")
 
+	const catalogue = "signed catalogue bytes over the wire"
 	up := startUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not reached", http.StatusTeapot)
+		_, _ = io.WriteString(w, catalogue)
 	})
 	f := &Facade{
 		Peers:       fakeLister{addrs: []string{startPeer(t, fakeCache{pkgName: content})}},
@@ -681,6 +844,20 @@ func TestFacadeOverRealHTTP(t *testing.T) {
 	}
 	if string(body) != string(content) {
 		t.Errorf("body = %q, want %q", body, content)
+	}
+
+	// UC-07 over the same wire: metadata is relayed, not refused.
+	metaResp, err := http.Get(srv.URL + "/stable/FreeBSD:15:amd64/latest/meta.conf")
+	if err != nil {
+		t.Fatalf("GET meta.conf: %v", err)
+	}
+	defer metaResp.Body.Close()
+	if metaResp.StatusCode != http.StatusOK {
+		t.Errorf("meta.conf status = %d, want 200 relayed from upstream", metaResp.StatusCode)
+	}
+	metaBody, _ := io.ReadAll(metaResp.Body)
+	if string(metaBody) != catalogue {
+		t.Errorf("meta.conf body = %q, want the upstream catalogue %q", metaBody, catalogue)
 	}
 }
 
