@@ -23,7 +23,13 @@ Commits are reviewed one at a time: **one reviewable change per commit**, messag
 ```sh
 go build ./... && go vet ./... && go test ./...   # the gate — no CI exists
 gofmt -l .                                        # must print nothing; no linter is configured
+go test ./... -race -count=2                      # before requesting a merge; see below
 ```
+
+`-race` is **not** part of the gate but is required before a merge request. §5.3
+merged green with a data race the plain gate cannot see, found only when a later
+change ran `-race`, and intermittent even then. Two HTTP servers, two
+semaphores, a watcher goroutine and a SIGHUP reload path now share this process.
 
 ```sh
 go test ./internal/daemon/                                  # one package

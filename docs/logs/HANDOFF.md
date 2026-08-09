@@ -51,12 +51,20 @@ commit as the work.
 - **Gate:** `go build ./... && go vet ./... && go test ./...`, plus `gofmt`.
   Tracker code and tests must run on any OS — no FreeBSD, no `pkg`, no second
   machine.
+- **Run `go test ./... -race -count=2` before requesting a merge.** Not part of
+  the gate above, and this is why it is called out separately: §5.3 merged green
+  with a data race in `startDiscoveryLocked` that the plain gate cannot see. It
+  was found only because §5.7 ran `-race` afterwards, and it was intermittent
+  even then — two runs in three. Concurrency is now everywhere in this codebase
+  (two HTTP servers, two semaphores, a watcher goroutine, SIGHUP reload), so the
+  plain gate is no longer sufficient evidence on its own.
 - **Work log required.** `docs/logs/<author>-<feature>.md` for every feature,
   including your areas of uncertainty and whether you raised them.
 
-Current branch: `main`; everything through `e94f8cb` is merged — which includes
-ADR-005, ADR-006 and its implementation, ADR-007, `docs/uc-07.puml` and
-`CLAUDE.md`.
+Current branch: `main`, and everything described in this document is merged
+into it. *(This line used to pin a commit hash, which went stale at every merge
+and twice told a new agent the tree was further behind than it was. Run
+`git log --oneline -5` instead — it is authoritative and this line cannot be.)*
 
 ADR-001 through -007 are all Approved. **§5.3 (the peer wire migration and the
 cache-backed seeder), §5.4 (mounting both servers) and §5.7 (the facade
