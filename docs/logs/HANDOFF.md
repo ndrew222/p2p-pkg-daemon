@@ -56,8 +56,9 @@ commit as the work.
 
 Current branch: `main`; everything through `bc5fabf` is merged.
 
-ADR-001 through -007 are all Approved. **§5.3 — the peer wire migration and the
-cache-backed seeder — is done**; §5.4's seed-server mount is what remains of it.
+ADR-001 through -007 are all Approved. **§5.3 (the peer wire migration and the
+cache-backed seeder) and §5.4 (mounting both servers) are done.** §5.7, the
+facade rework, is the next work item.
 
 **§4.4, §4.5 and §4.6 are all closed** (ADR-005, ADR-006 and ADR-007, ruled
 2026-08-08) and **§4.7 is ruled** (the two ADR-002 config key names,
@@ -90,11 +91,11 @@ that package.
 | `docs/adr/adr-006-upstream-mirror-config.md` | **Approved and implemented** (the key, not its consumer). `upstream_url` in jmj's config: required, no default, `${ABI}` expanded at startup, plaintext warned not refused. Closes §4.5. |
 | `docs/adr/adr-007-repository-topology.md` | **Approved.** jmj fronts one repository, replaces that one, coexists with every other enabled repository. `upstream_url` stays singular. Closes §4.6; corrects a misreading of ADR-003 in §4.6 and ADR-006. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
-| `docs/peer-transfer-spec-v0.2.md` | Current **and implemented** (§5.3), except the seed server's mount (§5.4). Its migration table and definition of done are both discharged. One self-contradiction is open with the owner — `400` vs `404` for a non-exact path; see §5.3. |
+| `docs/peer-transfer-spec-v0.2.md` | Current **and implemented** (§5.3, mounted in §5.4). Its migration table and definition of done are both discharged. One self-contradiction is open with the owner — `400` vs `404` for a non-exact path; see §5.3. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
 | `docs/uc-07.puml` | Current, **not implemented**. New — UC-07 had no diagram before ADR-005. Carries the relay flow, the 304 branch and the terminal `502`. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
-| `docs/uc-06.puml` | Current as of the HTTP peer wire. |
+| `docs/uc-06.puml` | Current as of the HTTP peer wire, **and implemented** (§5.3/§5.4). |
 
 ### Brought into line with the ADRs — **done, no longer a trap**
 
@@ -174,8 +175,8 @@ read-only and hands back the handle, so the seeder streams from the pkg cache
 and never holds a package. It is also the path-safety boundary for a
 name-version arriving off the wire — `peer.validName` deliberately is not one.
 
-§5.3 was a build, not just a migration, and that part is done. What is still
-outstanding is the wiring: see §5.4.
+§5.3 was a build, not just a migration, and it is done — including the wiring
+(§5.4). The daemon now listens on `serving_addr` and serves what it announces.
 
 **The facade model has now been exercised against real pkg and works** — see §7.
 A stand-in that proxied the signed catalogue was accepted as a genuine
@@ -542,13 +543,31 @@ not go before its replacement did. It went in the same change, as required:
 between the fetch loop and a hostile peer, and they are stricter than the
 constant ever was — exact, per package, and with no ceiling.
 
-### 5.4 Mount the facade and the seed server — **facade half DONE**
+### 5.4 Mount the facade and the seed server — **DONE**
 
-The seed-server half belongs to §5.3 and is not yet mounted. Trap for whoever touches this: a nil
+Both halves are mounted. The facade is on `facade_addr` (loopback-enforced) and
+the seed server on `serving_addr` (public, and its port is what the tracker
+advertises for us) — two listeners, deliberately, because the peer namespace is
+unlike the facade's precisely so a seeding daemon cannot be used as a pkg
+mirror, and one mux would undo that with a single entry.
+
+`Daemon.startSeedServerLocked` binds `serving_addr` synchronously, so a port it
+cannot take is reported to the caller instead of logged from a goroutine after
+startup has claimed success. `Daemon.stopSeedServerLocked` closes the server and
+the listener, in that order and unconditionally: `Serve` runs in a goroutine
+that may not have started yet, and without the listener close SIGHUP left the
+old address bound so the new one could never take over.
+
+The seeder's `404` is wired to the keep-alive's re-announce nudge, which closes
+the UC-06 §5b obligation end to end. `503` is not wired to it, and must not be.
+
+Trap for whoever touches this: a nil
 `*Repositories` assigned into an interface field is a **non-nil interface
 holding a nil pointer**, so every `== nil` check downstream passes and the first
 call panics. Both wiring sites go through `Daemon.repository()` for this reason;
 `TestStartHTTPServerRefusesWithoutARepositoryDatabase` is the regression test.
+The seed server avoids the same trap by *constructing* its `PackageSource`
+rather than assigning a possibly-nil pointer into the interface field.
 
 ### 5.5 Local peer blacklist — **DONE**
 
@@ -613,13 +632,13 @@ finds it.
   `[]byte`.~~ **Fixed in §5.3.** It now runs the real v0.2 wire end to end:
   `peer.Server` over `daemon.CacheSource`, fetched with `peer.FetchFromPeer`,
   with no `[]byte` on either side.
-- **The daemon announces a serving port nothing listens on.** `daemon.go`
-  announces `config.ServingPort()` and the keep-alive announces the whole cache,
-  but no seed server is mounted and none can be until §5.3. Every peer acting on
-  our tracker entry dials `serving_addr` and gets connection-refused. That
-  correctly does not blacklist us — a dial failure never does — so the cost is
-  one wasted attempt per peer, paid by the rest of the swarm. Worth knowing
-  before reading a trial's peer logs and concluding the tracker is broken.
+- ~~**The daemon announces a serving port nothing listens on.**~~ **Fixed in
+  §5.3/§5.4.** The seed server is mounted on `serving_addr` and serves
+  `GET /pkg/<name-version>` out of `cache_dir`. Kept here because it explains
+  older trial logs: every peer acting on our tracker entry used to dial and get
+  connection-refused, which correctly did *not* blacklist us — a dial failure
+  never does — so it cost one wasted attempt per peer and was invisible on our
+  side.
 - **`internal/daemon/facade.go` is BLOCKED and implements a superseded model.**
   Its tests pass, which is misleading: they encode the old contract, so green
   tests mean it is consistently wrong rather than correct. Frozen until §4.5 is

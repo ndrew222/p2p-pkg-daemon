@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ndrew222/p2p-pkg-daemon/internal/config"
 	"github.com/ndrew222/p2p-pkg-daemon/internal/discovery"
+	"github.com/ndrew222/p2p-pkg-daemon/internal/peer"
 )
 
 type Daemon struct {
@@ -22,6 +24,17 @@ type Daemon struct {
 	repo       *Repositories
 	done       chan struct{} // closed to stop the keep-alive loop
 	httpServer *http.Server
+	seedServer *peer.Server
+	// seedListener is held separately so shutdown is deterministic. Serve
+	// runs in a goroutine, so closing only the server would leave a window
+	// in which the listener is still bound and the replacement cannot take
+	// the address; closing the listener here is synchronous with the caller.
+	seedListener net.Listener
+	// reannounce nudges the keep-alive into a full announce. The cache
+	// watcher writes to it, and so does the seed server on a 404 (UC-06
+	// §5b). Owned by startDiscoveryLocked, which replaces it on every
+	// restart.
+	reannounce func()
 	running    bool
 }
 
@@ -78,6 +91,9 @@ func Start(cfg *config.DaemonConfig, configPath string) error {
 	}
 	if err := d.startHTTPServerLocked(); err != nil {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
+	}
+	if err := d.startSeedServerLocked(); err != nil {
+		return fmt.Errorf("failed to start the seed server: %w", err)
 	}
 
 	d.setupReloadHandler()
@@ -143,12 +159,13 @@ func (d *Daemon) startDiscoveryLocked() error {
 	// dozens of dependencies, each firing an fsnotify event) collapses into
 	// a single pending re-announce instead of dozens.
 	changed := make(chan struct{}, 1)
-	onChange := func(ChangeEvent) {
+	d.reannounce = func() {
 		select {
 		case changed <- struct{}{}:
 		default: // a re-announce is already pending; it will pick this up too
 		}
 	}
+	onChange := func(ChangeEvent) { d.reannounce() }
 
 	// The watcher now has a real repository database, so SanityFilter does
 	// the size comparison it was written for: a cached file whose size does
@@ -175,6 +192,96 @@ func (d *Daemon) startDiscoveryLocked() error {
 	return nil
 }
 
+// requestReannounce asks the keep-alive for a full announce.
+//
+// It reads d.reannounce under the lock because SIGHUP replaces the channel
+// behind it: the seed server outlives a discovery restart, so a closure
+// captured once would go on nudging a keep-alive that no longer exists. Safe
+// to call before discovery has started and after it has stopped -- both are a
+// no-op rather than a panic.
+func (d *Daemon) requestReannounce(nameVersion string) {
+	d.mu.Lock()
+	nudge := d.reannounce
+	d.mu.Unlock()
+	if nudge == nil {
+		return
+	}
+	// UC-06 §5b: a full re-announce, never a delta. If one entry has
+	// drifted others may have too, which is exactly why the whole list goes
+	// up rather than a correction for this one package.
+	log.Printf("Seed server: asked for %q, which we do not hold; re-announcing the full cache", nameVersion)
+	nudge()
+}
+
+// startSeedServerLocked mounts the peer seed server on serving_addr (UC-06).
+// CALLER MUST HOLD d.mu.
+//
+// Until this existed the daemon announced a serving port that nothing listened
+// on: every peer acting on our tracker entry dialled serving_addr and got
+// connection-refused. That correctly did not blacklist us -- a dial failure
+// never does -- so the cost was one wasted attempt per peer, paid by the rest
+// of the swarm.
+//
+// Note which address this is. facade_addr is loopback-enforced because the
+// facade drives this daemon's fetch loop on behalf of whoever asks and would
+// be an open relay off-host. serving_addr is the opposite by nature: peers are
+// on other machines, so it is public, and its port is the one announced to the
+// tracker.
+func (d *Daemon) startSeedServerLocked() error {
+	d.stopSeedServerLocked()
+	if d.config.CacheDir == "" {
+		// A seeder with no cache would answer 404 to every request and
+		// re-announce on each one. Report it rather than serve it.
+		return fmt.Errorf("no cache_dir configured; the seed server has nothing to serve from")
+	}
+
+	// The source is constructed here, never assigned from a possibly-nil
+	// pointer: a nil *CacheSource in the Source interface field would be a
+	// non-nil interface holding a nil pointer, so the seeder's own nil
+	// guard would pass and the first request would panic. Same trap as
+	// Daemon.repository().
+	d.seedServer = &peer.Server{
+		Source:                  NewCacheSource(d.config.CacheDir),
+		MaxConcurrentSeeds:      d.config.MaxConcurrentSeeds,
+		MaxConcurrentSeedsPerIP: d.config.MaxConcurrentSeedsPerIP,
+		OnNotHeld:               d.requestReannounce,
+	}
+
+	// Bound synchronously, so a failure to take serving_addr is reported to
+	// the caller rather than logged from a goroutine after startup has
+	// already claimed success.
+	ln, err := net.Listen("tcp", d.config.ServingAddr)
+	if err != nil {
+		d.seedServer = nil
+		return fmt.Errorf("serving_addr %s: %w", d.config.ServingAddr, err)
+	}
+	d.seedListener = ln
+
+	srv := d.seedServer
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("Seed server error: %v", err)
+		}
+	}()
+	return nil
+}
+
+// stopSeedServerLocked stops the seeder and releases serving_addr.
+// CALLER MUST HOLD d.mu. Safe to call when it was never started.
+func (d *Daemon) stopSeedServerLocked() {
+	if d.seedServer != nil {
+		d.seedServer.Close()
+		d.seedServer = nil
+	}
+	// Closed after the server, and unconditionally: Serve runs in a
+	// goroutine that may not have started yet, in which case Close found no
+	// http.Server to shut down and only this releases the port.
+	if d.seedListener != nil {
+		d.seedListener.Close()
+		d.seedListener = nil
+	}
+}
+
 // stopDiscoveryLocked stops the keep-alive loop and the cache watcher.
 // CALLER MUST HOLD d.mu. Safe to call when discovery was never started or is
 // already stopped.
@@ -183,6 +290,10 @@ func (d *Daemon) stopDiscoveryLocked() {
 		close(d.done)
 		d.done = nil // so a second call does not close a closed channel
 	}
+	// The nudge belongs to the keep-alive that is going away. Dropping it
+	// here is what makes requestReannounce a no-op rather than a send into
+	// a channel nobody reads.
+	d.reannounce = nil
 	if d.watcher != nil {
 		d.watcher.Stop()
 		d.watcher = nil
@@ -201,9 +312,11 @@ func (d *Daemon) startHTTPServerLocked() error {
 	// under a fixed prefix; packageRequest is what decides which of those
 	// paths are package files and which are metadata (UC-02, UC-07).
 	//
-	// The peer seed server (peer.Server, UC-06) still goes on serving_addr
-	// separately: it speaks the peerwire framing, not HTTP, until the peer
-	// wire migration lands.
+	// The peer seed server (peer.Server, UC-06) is a separate listener on
+	// serving_addr -- see startSeedServerLocked. The two surfaces stay
+	// apart on purpose: the peer namespace is deliberately unlike the
+	// facade's so a seeding daemon cannot be used as a pkg mirror, and
+	// mounting them on one listener would undo that with one mux entry.
 	//
 	// A restart rebuilds the facade, which resets its in-memory peer
 	// blacklist. That is accepted: the list is local, unpersisted and
@@ -286,6 +399,11 @@ func (d *Daemon) Reload() error {
 	trackerChanged := d.config.TrackerURL != newCfg.TrackerURL
 	cacheChanged := d.config.CacheDir != newCfg.CacheDir
 	repoDBChanged := d.config.RepoDBDir != newCfg.RepoDBDir
+	// The caps are read once, when the seeder is built, so changing either
+	// has to rebuild it. Making them live would mean sharing mutable state
+	// with every in-flight transfer for a setting that changes by SIGHUP.
+	capsChanged := d.config.MaxConcurrentSeeds != newCfg.MaxConcurrentSeeds ||
+		d.config.MaxConcurrentSeedsPerIP != newCfg.MaxConcurrentSeedsPerIP
 
 	d.config = newCfg
 
@@ -321,6 +439,17 @@ func (d *Daemon) Reload() error {
 		log.Printf("HTTP server restarted on %s", d.config.FacadeAddr)
 	}
 
+	// The seeder holds its listen address, its cache directory and both
+	// caps, so any of the four going stale means rebuilding it. It also has
+	// to be rebuilt whenever discovery restarted above, because its
+	// re-announce nudge belongs to the keep-alive that was replaced.
+	if servingChanged || cacheChanged || capsChanged || trackerChanged || repoDBChanged {
+		if err := d.startSeedServerLocked(); err != nil {
+			return fmt.Errorf("failed to restart the seed server: %w", err)
+		}
+		log.Printf("Seed server restarted on %s", d.config.ServingAddr)
+	}
+
 	return nil
 }
 
@@ -334,6 +463,7 @@ func (d *Daemon) Stop() error {
 	if d.httpServer != nil {
 		d.httpServer.Close()
 	}
+	d.stopSeedServerLocked()
 	d.stopDiscoveryLocked()
 
 	return nil

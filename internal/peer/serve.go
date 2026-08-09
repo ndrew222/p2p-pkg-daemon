@@ -95,8 +95,9 @@ type Server struct {
 	limiterOnce sync.Once
 	limiter     *seedLimiter
 
-	mu   sync.Mutex
-	http *http.Server
+	mu     sync.Mutex
+	http   *http.Server
+	closed bool
 }
 
 // ServeHTTP implements http.Handler.
@@ -234,22 +235,6 @@ func peerError(w http.ResponseWriter, code int, msg string) {
 	fmt.Fprintln(w, msg)
 }
 
-// httpServer builds (once) the http.Server this seeder runs on.
-func (s *Server) httpServer(addr string) *http.Server {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.http == nil {
-		s.http = &http.Server{
-			Addr:    addr,
-			Handler: s,
-			// Headers are bounded; the body write is not. See
-			// readHeaderTimeout.
-			ReadHeaderTimeout: readHeaderTimeout,
-		}
-	}
-	return s.http
-}
-
 // ListenAndServe runs the seeder on addr, which is config.ServingAddr. Unlike
 // facade_addr this one is public by nature: peers are on other machines.
 func (s *Server) ListenAndServe(addr string) error {
@@ -262,17 +247,45 @@ func (s *Server) ListenAndServe(addr string) error {
 
 // Serve runs the seeder on an already-open listener. It returns
 // http.ErrServerClosed after Close, like any http.Server.
+//
+// Callers usually run this in a goroutine, so it has to cope with a Close that
+// arrives BEFORE it: the closed flag is what makes that safe. Without it a
+// shutdown raced against startup would leave the listener open with nothing
+// serving it, which on the daemon's SIGHUP path meant the old serving_addr
+// stayed bound and the new one could never take over.
 func (s *Server) Serve(ln net.Listener) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		ln.Close()
+		return http.ErrServerClosed
+	}
+	if s.http == nil {
+		s.http = &http.Server{
+			Addr:    ln.Addr().String(),
+			Handler: s,
+			// Headers are bounded; the body write is not. See
+			// readHeaderTimeout.
+			ReadHeaderTimeout: readHeaderTimeout,
+		}
+	}
+	srv := s.http
+	s.mu.Unlock()
+
 	log.Printf("peer: seed server listening on %s (max concurrent seeds: %s, per IP: %s)",
 		ln.Addr(), capForLog(s.MaxConcurrentSeeds), capForLog(s.MaxConcurrentSeedsPerIP))
-	return s.httpServer(ln.Addr().String()).Serve(ln)
+	return srv.Serve(ln)
 }
 
-// Close stops the seeder. In-flight transfers are cut off, which is correct
-// for a shutdown: the requester falls through to another holder, and nothing
-// it has received unverified can reach pkg.
+// Close stops the seeder, and keeps it stopped: a Serve that starts afterwards
+// closes its listener and returns rather than quietly resurrecting it.
+//
+// In-flight transfers are cut off, which is correct for a shutdown. The
+// requester falls through to another holder, and nothing it received
+// unverified can reach pkg.
 func (s *Server) Close() error {
 	s.mu.Lock()
+	s.closed = true
 	srv := s.http
 	s.mu.Unlock()
 	if srv == nil {
