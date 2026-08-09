@@ -80,8 +80,8 @@ relayed, (b) and (d) ratified exactly as they shipped.
 
 - **§5.3** — the peer spec contradicts itself on whether a non-exact path is
   `400` or `404`. One line either way; see `docs/logs/claude-peer-wire-v0.2.md`.
-- **§4.9** — one spurious catalogue reload per `pkg update`, found by
-  measurement on the host. Small fix, but it contradicts a sentence in ADR-008.
+- ~~**§4.9**~~ **RULED 2026-08-10 and fixed** — the watcher ignores the lock
+  file, ADR-008 carries a dated amendment.
 - **§4.10** — jmj's own catalogue lands inside `repo_db_dir` and collides with
   the upstream repository's on every row. Harmless today, a failure mode after a
   repository rebuild.
@@ -601,7 +601,27 @@ operator finds out immediately and every install fails until they fix it.
 disagree in comments, and a later reader may "fix" one to match the other
 without knowing a choice was made.
 
-### 4.9 One spurious catalogue reload per `pkg update` — **RAISED 2026-08-09**
+### 4.9 One spurious catalogue reload per `pkg update` — **RULED 2026-08-10. Fixed.**
+
+**Ruled: ignore the lock file.** `repo_db_dir/<repo>/lock` no longer arms the
+settle timer; everything else still does, whatever its op. Recorded as a dated
+amendment to `docs/adr/adr-008-repository-reload-trigger.md`, which had said
+this is exactly what changes if the measurement contradicted the mechanism.
+
+The principle, rather than the observation, is what justifies the exception: **a
+lock file is a mutex and carries no catalogue data, so no reload can ever be
+owed to it.** `meta` is deliberately *not* excluded — it is repository metadata
+pkg rewrites when the repository changes, and one reload we did not need is far
+cheaper than missing one we did. The exclusion list is one entry long and should
+stay that way.
+
+Tests: `TestRepoWatcherIgnoresTheLockFile` (lock activity alone reloads nothing,
+and does not consume the reload a later catalogue write is owed) and
+`TestRepoWatcherReloadsOncePerUpdateSequence` (lock → meta → silence → rewrite).
+
+The original statement of the problem follows.
+
+---
 
 Found by measurement on the reference host, not by reading the code. Full data
 in `docs/logs/claude-freebsd-host-round.md` §2.

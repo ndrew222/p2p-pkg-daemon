@@ -28,6 +28,11 @@ import (
 // case. Nothing outside a test writes it.
 var repoSettleDelay = 2 * time.Second
 
+// repoLockFile is pkg's per-repository lock, repo_db_dir/<repo>/lock. It is the
+// one name the watcher ignores; see loop for why, and HANDOFF §4.9 for the
+// measurement.
+const repoLockFile = "lock"
+
 // RepoWatcher reloads the repository database when pkg rewrites it (ADR-008,
 // HANDOFF §5.2).
 //
@@ -148,15 +153,32 @@ func (w *RepoWatcher) loop() {
 			}
 			return
 
-		case _, ok := <-w.watcher.Events:
+		case event, ok := <-w.watcher.Events:
 			if !ok {
 				return
 			}
-			// Every event under repo_db_dir counts, whatever its op. The
-			// watcher does not try to tell a catalogue rewrite from a
-			// journal file being created -- the reload reads the whole
-			// tree anyway, and the settle delay is what makes guessing
-			// unnecessary.
+			// One name is ignored and everything else counts, whatever its
+			// op: the reload reads the whole tree anyway, and the settle
+			// delay is what makes guessing at pkg's layout unnecessary.
+			//
+			// The exception is repo_db_dir/<repo>/lock, and it is measured
+			// rather than assumed (HANDOFF §4.9). pkg takes that lock
+			// ELEVEN SECONDS before it writes anything: it touches lock,
+			// writes meta, then downloads in silence, and only then
+			// rewrites the catalogue. Counting the lock therefore fires
+			// the timer inside that silence and reloads the catalogue we
+			// already have -- 38,052 rows for nothing, a re-announce
+			// nobody needed, and a log line claiming a reload eleven
+			// seconds before the change.
+			//
+			// It is safe to ignore because a lock file is a mutex: it
+			// carries no catalogue data, so no reload can ever be owed to
+			// it. meta is NOT ignored -- it is repository metadata pkg
+			// rewrites when the repository changes, and one reload we did
+			// not need is far cheaper than missing one we did.
+			if filepath.Base(event.Name) == repoLockFile {
+				continue
+			}
 			if timer != nil {
 				timer.Stop()
 			}

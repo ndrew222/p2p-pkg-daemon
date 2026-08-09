@@ -98,6 +98,15 @@ below the same way.
   prompted the events has finished. The value is a constant with this reasoning
   attached, not a tuning parameter — there is no configuration key for it.
 
+  **Measured, and the margin is comfortable:** the largest gap between events
+  *inside* a catalogue rewrite is 0.48s, so a two-second timer cannot fire
+  mid-write. See the amendment below.
+
+- **Every event counts except one, and the exception is measured.**
+  `repo_db_dir/<repo>/lock` is ignored; everything else arms the timer whatever
+  its op. See the amendment below — this replaces the original wording, which
+  admitted no exceptions.
+
 - **A failed reload is not fatal and must not discard the snapshot.** Failure at
   *startup* stays fatal, for the reason `openRepositoriesLocked` already gives:
   a daemon with no catalogue cannot verify a single package and would answer
@@ -132,14 +141,73 @@ cache watcher and the keep-alive, because SIGHUP already restarts discovery on a
 superset of the conditions that would stale this watcher — including a change to
 `repo_db_dir`, which replaces the `Repositories` instance it reloads.
 
-**A rewrite that produces no filesystem event produces no reload.** The design
+~~**A rewrite that produces no filesystem event produces no reload.** The design
 assumes pkg touches `repo_db_dir` in a way the platform reports. That is nearly
-certain and is not yet measured on FreeBSD; the measurement is part of the host
-round, and if a catalogue refresh turns out to leave the watched directories
-untouched, the mechanism section above is what has to change.
+certain and is not yet measured on FreeBSD.~~ **Measured 2026-08-09 — see the
+amendment.**
 
 **A hostile local process can make the daemon reload repeatedly** by touching
 `repo_db_dir`. It cannot make it reload faster than once per settle delay, and
 anything that can write to pkg's repository directory can already replace the
 catalogue itself — which is a considerably worse position than being able to
 waste some of the daemon's CPU.
+
+---
+
+## Amendment, 2026-08-10 — measured on the reference host
+
+**Approved by Andrew (ruled 2026-08-10).** Resolves `docs/logs/HANDOFF.md` §4.9.
+Evidence: `docs/logs/claude-freebsd-host-round.md` §2. This ADR's original
+consequences section said the mechanism above is what changes if the measurement
+contradicted it. It did, in one respect.
+
+### What was measured
+
+One `pkg update -f`, watched with two independent fsnotify watch sets:
+
+| | |
+|---|---|
+| events under `repo_db_dir` | 21,650 |
+| largest gap **inside** a catalogue rewrite | **0.48s** |
+| gap between taking the lock and writing anything | **11.2s** |
+
+The order is the finding:
+
+```
+t=3.0s   touch  <repo>/lock      pkg takes the repository lock
+t=4.2s   write  <repo>/meta      meta.conf, fetched
+t=4.2s → 15.4s  (nothing)        downloading 73 MB; repo_db_dir is untouched
+t=15.4s  rename <repo>/db aside, create a new one
+t=15.4s → 25.4s (~21,600 writes) the catalogue is rebuilt
+```
+
+Two things follow. **The settle delay is confirmed with margin** — 0.48s against
+a two-second timer, so a reload cannot land mid-rewrite. And **the original "every
+event counts" rule cost a reload per update**: the timer fired inside the 11.2s
+silence and reloaded the catalogue already in memory, then fired again after the
+real rewrite.
+
+### What changes
+
+**`repo_db_dir/<repo>/lock` no longer arms the settle timer.** Everything else
+still does, whatever its op.
+
+The original wording — *"every event under `repo_db_dir` counts, whatever its
+op; the watcher does not try to tell a catalogue rewrite from a journal file
+being created"* — was written to avoid guessing at pkg's file layout, and that
+caution was right at the time. The layout is now measured, and one name can be
+excluded on a principle rather than a guess: **a lock file is a mutex and
+carries no catalogue data, so no reload can ever be owed to it.**
+
+**`meta` is deliberately not excluded.** It is repository metadata that pkg
+rewrites when the repository changes, so a reload prompted by it is defensible
+even when redundant. One reload we did not need is far cheaper than missing one
+we did, and that asymmetry is the reason the exclusion list is one entry long
+and should stay that way.
+
+### What does not change
+
+The reload still reads the whole tree, so no event is *required* for
+correctness — only for timeliness. Nothing here weakens that: a catalogue
+rewrite produces thousands of events on the `db` file itself, and the exclusion
+cannot suppress them.
