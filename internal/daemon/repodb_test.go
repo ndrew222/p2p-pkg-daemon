@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -269,14 +270,19 @@ func TestCollisionResolvesToFirstPathInOrder(t *testing.T) {
 
 // One misconfigured repository can shadow ports wholesale, so the diagnostic
 // has to stay a diagnostic rather than dumping 38,000 names into the log.
+//
+// The rows DISAGREE, which after ADR-010 is what gets reported at all: a
+// duplicate that agrees is the normal state once pkg writes jmj's own catalogue
+// into repo_db_dir, and logging those meant 37,813 lines per reload.
 func TestCollisionLogIsCapped(t *testing.T) {
 	dir := t.TempDir()
-	var rows []fixtureRow
+	var rows, conflicting []fixtureRow
 	for i := 0; i < logNameLimit+5; i++ {
 		rows = append(rows, fixtureRow{fmt.Sprintf("dup%02d", i), "1.0", 10, hash64('a')})
+		conflicting = append(conflicting, fixtureRow{fmt.Sprintf("dup%02d", i), "1.0", 20, hash64('b')})
 	}
 	writeRepoDB(t, dir, "aaa-first", rows)
-	writeRepoDB(t, dir, "zzz-second", rows)
+	writeRepoDB(t, dir, "zzz-second", conflicting)
 
 	logged := captureLog(t)
 	if _, err := OpenRepositories(dir); err != nil {
@@ -409,5 +415,187 @@ func TestReloadFailureKeepsThePreviousSnapshot(t *testing.T) {
 	}
 	if got := repo.Len(); got != 1 {
 		t.Errorf("Len() = %d after a failed Reload, want 1", got)
+	}
+}
+
+// writeRepoSource records the repository URL pkg stores in repodata, which is
+// what identifies a catalogue as this daemon's own (ADR-010). Measured shape on
+// the reference host: repodata holds key/value pairs and the key is
+// "packagesite".
+func writeRepoSource(t *testing.T, dir, repo, url string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, repo, repoDBFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS repodata (key TEXT UNIQUE NOT NULL, value TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR REPLACE INTO repodata (key, value) VALUES ('packagesite', ?)`, url); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ADR-010: pkg resolved the package from the jmj repository, so jmj's row is
+// the one pkg is acting on -- even though "jmj" sorts after "FreeBSD-ports" and
+// path order would have picked the other one.
+func TestOwnCatalogueWinsACollision(t *testing.T) {
+	dir := t.TempDir()
+	writeRepoDB(t, dir, "FreeBSD-ports", []fixtureRow{{"dup", "1.0", 111, hash64('a')}})
+	writeRepoDB(t, dir, "jmj", []fixtureRow{{"dup", "1.0", 222, hash64('b')}})
+	writeRepoSource(t, dir, "FreeBSD-ports", "pkg+https://pkg.FreeBSD.org/FreeBSD:15:amd64/quarterly")
+	writeRepoSource(t, dir, "jmj", "http://127.0.0.1:9001")
+
+	repo, err := OpenRepositories(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := repo.ExpectedHash("dup-1.0"); got != hash64('b') {
+		t.Errorf("ExpectedHash(dup-1.0) = %q, want the row from our own catalogue", got)
+	}
+	if got, _ := repo.ExpectedFileSizeBytes("dup-1.0"); got != 222 {
+		t.Errorf("ExpectedFileSizeBytes(dup-1.0) = %d, want 222 from the same row as the hash", got)
+	}
+}
+
+// The fallback must be untouched, because that is what every host which has not
+// adopted jmj is running -- and what this one runs on its first start, before
+// pkg has written our catalogue at all.
+func TestPathOrderStillDecidesWithoutAnOwnCatalogue(t *testing.T) {
+	dir := t.TempDir()
+	writeRepoDB(t, dir, "aaa-first", []fixtureRow{{"dup", "1.0", 111, hash64('a')}})
+	writeRepoDB(t, dir, "zzz-second", []fixtureRow{{"dup", "1.0", 222, hash64('b')}})
+	writeRepoSource(t, dir, "aaa-first", "pkg+https://pkg.FreeBSD.org/FreeBSD:15:amd64/quarterly")
+	writeRepoSource(t, dir, "zzz-second", "pkg+https://pkg.FreeBSD.org/FreeBSD:15:amd64/kmods_quarterly_1")
+
+	repo, err := OpenRepositories(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := repo.ExpectedHash("dup-1.0"); got != hash64('a') {
+		t.Errorf("ExpectedHash(dup-1.0) = %q, want the first repository in path order", got)
+	}
+}
+
+// The deployment's normal state: jmj's catalogue is a copy of the repository it
+// fronts, so every row duplicates and every duplicate agrees. Logging those is
+// what teaches an operator to ignore the log.
+func TestAgreeingDuplicatesAreNotLogged(t *testing.T) {
+	dir := t.TempDir()
+	rows := []fixtureRow{
+		{"nginx", "1.24.0_2", 1234, hash64('a')},
+		{"curl", "8.6.0", 42, hash64('d')},
+	}
+	writeRepoDB(t, dir, "FreeBSD-ports", rows)
+	writeRepoDB(t, dir, "jmj", rows)
+	writeRepoSource(t, dir, "jmj", "http://127.0.0.1:9001")
+
+	logged := captureLog(t)
+	repo, err := OpenRepositories(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := logged(); strings.Contains(out, "DISAGREE") {
+		t.Errorf("identical duplicate rows were reported as a conflict; got:\n%s", out)
+	}
+	if got := repo.Len(); got != 2 {
+		t.Errorf("Len() = %d, want 2 -- duplicates collapse to one row each", got)
+	}
+}
+
+// And the case the alarm exists for: the two catalogues have drifted, which is
+// where picking the wrong row makes us blacklist an honest peer.
+func TestDisagreeingDuplicatesAreLoggedOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeRepoDB(t, dir, "FreeBSD-ports", []fixtureRow{
+		{"nginx", "1.24.0_2", 1234, hash64('a')},
+		{"curl", "8.6.0", 42, hash64('d')},
+	})
+	writeRepoDB(t, dir, "jmj", []fixtureRow{
+		{"nginx", "1.24.0_2", 1299, hash64('c')}, // rebuilt: same version, new bytes
+		{"curl", "8.6.0", 42, hash64('d')},
+	})
+	writeRepoSource(t, dir, "jmj", "http://127.0.0.1:9001")
+
+	logged := captureLog(t)
+	repo, err := OpenRepositories(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := logged()
+	if !strings.Contains(out, "nginx-1.24.0_2") {
+		t.Errorf("the drifted package is not named in the log; got:\n%s", out)
+	}
+	if strings.Contains(out, "curl-8.6.0") {
+		t.Errorf("a package whose rows agree was reported as a conflict; got:\n%s", out)
+	}
+	// Our row still wins, which is the point of reporting rather than refusing.
+	if got, _ := repo.ExpectedHash("nginx-1.24.0_2"); got != hash64('c') {
+		t.Errorf("ExpectedHash = %q, want our own catalogue's row despite the conflict", got)
+	}
+}
+
+func TestOwnCatalogueFirst(t *testing.T) {
+	const ours = "/db/jmj/db"
+	tests := []struct {
+		name    string
+		paths   []string
+		sources map[string]string
+		want    []string
+	}{
+		{
+			name:    "no sources at all leaves the order alone",
+			paths:   []string{"/db/a/db", "/db/b/db"},
+			sources: map[string]string{},
+			want:    []string{"/db/a/db", "/db/b/db"},
+		},
+		{
+			name:  "no loopback source leaves the order alone",
+			paths: []string{"/db/a/db", "/db/b/db"},
+			sources: map[string]string{
+				"/db/a/db": "pkg+https://pkg.FreeBSD.org/FreeBSD:15:amd64/quarterly",
+				"/db/b/db": "https://example.invalid/repo",
+			},
+			want: []string{"/db/a/db", "/db/b/db"},
+		},
+		{
+			name:    "ours moves to the front",
+			paths:   []string{"/db/a/db", ours, "/db/z/db"},
+			sources: map[string]string{ours: "http://127.0.0.1:9001"},
+			want:    []string{ours, "/db/a/db", "/db/z/db"},
+		},
+		{
+			name:    "localhost counts as ours",
+			paths:   []string{"/db/a/db", ours},
+			sources: map[string]string{ours: "http://localhost:9001"},
+			want:    []string{ours, "/db/a/db"},
+		},
+		{
+			// Degenerate -- jmj fronts one repository (ADR-007) -- but it
+			// must not fall to map iteration order.
+			name:  "several loopback catalogues keep path order between them",
+			paths: []string{"/db/a/db", "/db/m/db", "/db/z/db"},
+			sources: map[string]string{
+				"/db/z/db": "http://127.0.0.1:9001",
+				"/db/m/db": "http://127.0.0.2:9001",
+			},
+			want: []string{"/db/m/db", "/db/z/db", "/db/a/db"},
+		},
+		{
+			name:    "an unparsable source is not ours",
+			paths:   []string{"/db/a/db", "/db/b/db"},
+			sources: map[string]string{"/db/b/db": "::not a url::"},
+			want:    []string{"/db/a/db", "/db/b/db"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ownCatalogueFirst(slices.Clone(tc.paths), tc.sources)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ownCatalogueFirst() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

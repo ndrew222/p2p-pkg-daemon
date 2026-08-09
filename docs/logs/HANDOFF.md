@@ -76,15 +76,14 @@ ADR-007 (2026-08-08); §4.7, the two ADR-002 config key names, by owner ruling
 upheld and made binding by ADR-009, (c) overturned so that pkg's `User-Agent` is
 relayed, (b) and (d) ratified exactly as they shipped.
 
-**Three things are with the owner and nothing is blocked on any of them.**
+**One thing is with the owner and nothing is blocked on it.** §5.3: the peer
+spec contradicts itself on whether a non-exact path is `400` or `404`. One line
+either way; see `docs/logs/claude-peer-wire-v0.2.md`.
 
-- **§5.3** — the peer spec contradicts itself on whether a non-exact path is
-  `400` or `404`. One line either way; see `docs/logs/claude-peer-wire-v0.2.md`.
-- ~~**§4.9**~~ **RULED 2026-08-10 and fixed** — the watcher ignores the lock
-  file, ADR-008 carries a dated amendment.
-- **§4.10** — jmj's own catalogue lands inside `repo_db_dir` and collides with
-  the upstream repository's on every row. Harmless today, a failure mode after a
-  repository rebuild.
+Both items the host round raised were ruled on 2026-08-10 and are fixed —
+**§4.9** (the watcher ignores pkg's lock file; ADR-008 carries a dated
+amendment) and **§4.10** (the daemon prefers its own repository's rows;
+ADR-010).
 
 **The FreeBSD host round is done (2026-08-09) and closed nearly everything it
 was holding**: the suite passes on the target OS, ADR-008's platform assumption
@@ -651,7 +650,45 @@ still a rule change.
 reload eleven seconds before anything changed, which will mislead somebody
 reading logs.
 
-### 4.10 jmj's own catalogue lands inside `repo_db_dir` — **RAISED 2026-08-09**
+### 4.10 jmj's own catalogue lands inside `repo_db_dir` — **RULED 2026-08-10. Fixed.**
+
+**Ruled: prefer our own catalogue's rows**, recorded as
+`docs/adr/adr-010-own-catalogue-preference.md` (Approved) and implemented in
+`internal/daemon/repodb.go`.
+
+Not a tie-break. **pkg resolved the package from the jmj repository**, so jmj's
+row is the one pkg is acting on and the one the bytes it re-verifies must match;
+using a repository pkg never consulted is the wrong choice, not a neutral one.
+The other obvious option — skip our own catalogue — keeps the rows pkg did not
+use and discards the ones it did.
+
+Mechanically it is one reordering: `ownCatalogueFirst` puts the loopback-sourced
+catalogue in front and the existing first-wins merge does the rest. Identifying
+"ours" needed nothing new — `upstreamcheck.go` already reads
+`repodata.packagesite` and already carries the concept in a comment written
+before this problem was found. **With no loopback catalogue the order is
+unchanged**, so every host that has not adopted jmj, and this one's first start
+before pkg writes our catalogue, behave exactly as before.
+
+**The collision log changed with it.** Reporting every duplicate meant 37,813
+lines per reload in the normal deployment. It now compares the rows and reports
+only genuine disagreement in `cksum` or `pkgsize` — silent today, and a precise
+alarm on exactly the drift that would otherwise have us blacklisting an honest
+peer.
+
+Tests: `TestOwnCatalogueWinsACollision`,
+`TestPathOrderStillDecidesWithoutAnOwnCatalogue`,
+`TestAgreeingDuplicatesAreNotLogged`, `TestDisagreeingDuplicatesAreLoggedOnce`,
+and `TestOwnCatalogueFirst` (table-driven, including several loopback catalogues
+and an unparsable source).
+
+**ADR-007's trap is untouched:** this narrows *which row* is used, not *whether*
+the package exists, so a successful lookup is still not proof `upstream_url` can
+serve that package.
+
+The original statement of the problem follows.
+
+---
 
 Also from the host round, and it only appears in a real deployment: configuring
 jmj as a pkg repository makes pkg create `/var/db/pkg/repos/jmj/db` — **inside

@@ -91,19 +91,26 @@ func (r *Repositories) Reload() error {
 		return fmt.Errorf("daemon: no repository database found under %q (expected <repository>/%s)", r.dir, repoDBFile)
 	}
 
-	rows := make(map[string]repoRow)
+	// The sources are read before anything is merged, because ADR-010 makes
+	// them decide the merge order: our own catalogue is loaded first so that
+	// the first-wins rule below resolves a collision in its favour without
+	// needing a second rule. Advisory failures are swallowed by design -- a
+	// source that cannot be read leaves its catalogue in path order, which is
+	// where it was anyway. See upstreamcheck.go.
 	sources := make(map[string]string)
-	var collisions []string
+	for _, path := range paths {
+		if src, err := loadRepositorySource(path); err == nil && src != "" {
+			sources[path] = src
+		}
+	}
+	paths = ownCatalogueFirst(paths, sources)
+
+	rows := make(map[string]repoRow)
+	var conflicts []string
 	for _, path := range paths {
 		loaded, skipped, err := loadRepositoryDatabase(path)
 		if err != nil {
 			return fmt.Errorf("daemon: %s: %w", path, err)
-		}
-		// Advisory only, so a failure here is swallowed by design: the
-		// source URL powers a warning and nothing else. See
-		// upstreamcheck.go.
-		if src, err := loadRepositorySource(path); err == nil && src != "" {
-			sources[path] = src
 		}
 		// A row the daemon cannot trust is worse than useless: the fetch
 		// path would compare peer bytes against it, never match, and
@@ -124,12 +131,13 @@ func (r *Repositories) Reload() error {
 				path, n, namesForLog(skipped.badPkgSize))
 		}
 		for nameVersion, row := range loaded {
-			if _, dup := rows[nameVersion]; dup {
-				// Ratified: the first repository in sorted path order
-				// wins, deterministically, and the colliding names are
-				// logged. Measured: zero collisions across both
-				// repositories on the reference host (37,835 and 239
-				// rows).
+			if existing, dup := rows[nameVersion]; dup {
+				// First wins, and ownCatalogueFirst has already put OUR
+				// catalogue first (ADR-010). That is not a tie-break: pkg
+				// resolved the package from the jmj repository, so jmj's
+				// row is the one pkg is acting on and the one the bytes it
+				// re-verifies must match. Where no catalogue is ours, this
+				// is still the ratified first-in-path-order rule.
 				//
 				// The choice cannot be delegated to pkg even though pkg
 				// has repository priority and has already picked a row
@@ -140,25 +148,27 @@ func (r *Repositories) Reload() error {
 				// /pkg/<name-version> by design, so a peer holding a
 				// colliding name-version cannot say which file it has.
 				//
-				// Picking wrong degrades to a failed install, never a
-				// corrupt one, because UC-02 step 10 has pkg re-verify
-				// the bytes we hand over. The one consequence that covers
-				// is that a wrong row makes us blacklist an *honest* peer
-				// for our own bad data -- which is why the names are
-				// logged, and why first-wins beats refusing to start: the
-				// downside is bounded and diagnosable, whereas refusing
-				// lets one misconfigured third-party repository take the
-				// daemon down.
-				collisions = append(collisions, nameVersion)
+				// Only DISAGREEING rows are reported. In the intended
+				// deployment every row collides -- pkg writes jmj's own
+				// catalogue into repo_db_dir, a copy of the repository we
+				// front -- so logging every duplicate meant 37,813 lines
+				// per reload, which teaches the reader to ignore the log
+				// rather than telling them anything. A conflict is
+				// different: it means the two catalogues have drifted,
+				// which is the case where picking wrong makes us blacklist
+				// an *honest* peer for our own bad data.
+				if existing != row {
+					conflicts = append(conflicts, nameVersion)
+				}
 				continue
 			}
 			rows[nameVersion] = row
 		}
 		log.Printf("daemon: loaded %d package(s) from %s", len(loaded), path)
 	}
-	if len(collisions) > 0 {
-		log.Printf("daemon: %d name-version(s) appear in more than one repository; the first in path order won: %s",
-			len(collisions), namesForLog(collisions))
+	if len(conflicts) > 0 {
+		log.Printf("daemon: %d name-version(s) DISAGREE between repositories on hash or size; the catalogue this daemon fronts won, or the first in path order if none is ours. One of the catalogues is stale -- run pkg update: %s",
+			len(conflicts), namesForLog(conflicts))
 	}
 
 	r.mu.Lock()
@@ -166,6 +176,47 @@ func (r *Repositories) Reload() error {
 	r.sources = sources
 	r.mu.Unlock()
 	return nil
+}
+
+// ownCatalogueFirst reorders paths so this daemon's own catalogue is merged
+// first, which is how ADR-010 is implemented: the merge below already keeps the
+// first row it sees, so putting ours in front resolves every collision in its
+// favour without a second rule.
+//
+// "Ours" is a catalogue whose recorded source is a loopback URL. That is not a
+// new idea here -- upstreamcheck.go already relies on it, in a comment written
+// before this problem was found: once the operator has switched pkg over to
+// jmj, pkg records OUR address as the repository's URL, because that is what
+// pkg fetched from.
+//
+// Two properties matter and both are deliberate:
+//
+//   - With no loopback catalogue the order is UNCHANGED, so a host that has not
+//     adopted jmj -- and the first start after switching, before pkg has
+//     written our catalogue -- behaves exactly as before.
+//   - The partition is stable, so several loopback catalogues (a degenerate
+//     case; jmj fronts one repository per ADR-007) still resolve by path order
+//     between themselves rather than by map iteration.
+func ownCatalogueFirst(paths []string, sources map[string]string) []string {
+	ours := make([]string, 0, 1)
+	theirs := make([]string, 0, len(paths))
+	for _, path := range paths {
+		src, ok := sources[path]
+		if !ok {
+			theirs = append(theirs, path)
+			continue
+		}
+		normalised, ok := normaliseRepoURL(src)
+		if ok && isLoopbackURL(normalised) {
+			ours = append(ours, path)
+			continue
+		}
+		theirs = append(theirs, path)
+	}
+	if len(ours) == 0 {
+		return paths
+	}
+	return append(ours, theirs...)
 }
 
 // Sources maps each catalogue's path to the upstream URL pkg recorded for it,
