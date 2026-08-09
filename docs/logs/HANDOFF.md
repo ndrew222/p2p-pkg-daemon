@@ -118,6 +118,7 @@ upstream can serve that package.
 | `docs/adr/adr-007-repository-topology.md` | **Approved.** jmj fronts one repository, replaces that one, coexists with every other enabled repository. `upstream_url` stays singular. Closes §4.6; corrects a misreading of ADR-003 in §4.6 and ADR-006. |
 | `docs/adr/adr-008-repository-reload-trigger.md` | **Approved and implemented.** `fsnotify` on `repo_db_dir` triggers `Repositories.Reload`; directories watched not files, two-second settle, runtime failure keeps the old snapshot, a successful reload re-announces. Closes the §5.2 follow-up. |
 | `docs/adr/adr-009-facade-status-set.md` | **Approved.** The facade's status set is exhaustive and has no `500`; `peer.ErrSpool` is a peer-path failure and goes to upstream. Closes §4.8(a) and settles the §5.3/§5.7 disagreement. |
+| `docs/adr/adr-010-own-catalogue-preference.md` | **Approved.** On a name-version collision the row from this daemon's own repository wins, identified by a loopback source URL; path order remains the fallback. Closes §4.10. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current **and implemented** (§5.3, mounted in §5.4). Its migration table and definition of done are both discharged. One self-contradiction is open with the owner — `400` vs `404` for a non-exact path; see §5.3. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
