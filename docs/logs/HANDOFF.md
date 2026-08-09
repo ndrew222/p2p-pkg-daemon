@@ -54,7 +54,9 @@ commit as the work.
 - **Work log required.** `docs/logs/<author>-<feature>.md` for every feature,
   including your areas of uncertainty and whether you raised them.
 
-Current branch: `main`; everything through `bc5fabf` is merged.
+Current branch: `main`; everything through `e94f8cb` is merged — which includes
+ADR-005, ADR-006 and its implementation, ADR-007, `docs/uc-07.puml` and
+`CLAUDE.md`.
 
 ADR-001 through -007 are all Approved, and **§5.3 is the next work item and is
 fully unblocked.**
@@ -553,8 +555,9 @@ no `[]byte` — ADR-003), the narrowed `404`/`502` semantics, `If-Modified-Since
 relay (§6), and the contract comment at the top of the file. The document
 corrections that used to be listed here are **done** — see §1.
 
-A marker is in the file itself; `grep -rn 'BLOCKED (HANDOFF §5.7)' internal/`
-finds it.
+A marker is in the file itself; `grep -rn 'SUPERSEDED (HANDOFF §5.7)' internal/`
+finds it. (It read `BLOCKED` until the rulings landed; the older grep string
+appears in commit messages and finds nothing now.)
 
 ## 6. Known defects
 
@@ -567,12 +570,13 @@ finds it.
   correctly does not blacklist us — a dial failure never does — so the cost is
   one wasted attempt per peer, paid by the rest of the swarm. Worth knowing
   before reading a trial's peer logs and concluding the tracker is broken.
-- **`internal/daemon/facade.go` is BLOCKED and implements a superseded model.**
-  Its tests pass, which is misleading: they encode the old contract, so green
-  tests mean it is consistently wrong rather than correct. Frozen until §4.5 is
-  ruled — see §5.7. Note that ADR-005 has now made the *metadata* branch a known
-  defect rather than an open question: it answers `404`, which §7.1 measured
-  breaks `pkg update` outright, and it must relay from upstream instead. The
+- **`internal/daemon/facade.go` implements a superseded model.** Its tests pass,
+  which is misleading: they encode the old contract, so green tests mean it is
+  consistently wrong rather than correct. **No longer blocked** — the rulings it
+  waited on landed on 2026-08-08 — it awaits the §5.7 rewrite. Note that ADR-005
+  has now made the *metadata* branch a known defect rather than an open
+  question: it answers `404`, which §7.1 measured breaks `pkg update` outright,
+  and it must relay from upstream instead. The
   tests that encode the refusal (`facade_test.go:91`, `:189`, `:354`, and
   `daemon_test.go:187`, which uses a metadata path as its probe) go with it.
 - **The facade has no answer for `If-Modified-Since`.** pkg sends conditional
