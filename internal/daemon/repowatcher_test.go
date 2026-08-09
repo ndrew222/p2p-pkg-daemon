@@ -139,46 +139,52 @@ func TestRepoWatcherCollapsesABurstIntoOneReload(t *testing.T) {
 	}
 }
 
-// HANDOFF §4.9, measured on the reference host: pkg touches <repo>/lock eleven
-// seconds before it writes anything, so counting that event fires the settle
-// timer inside the download and reloads the catalogue we already have.
-func TestRepoWatcherIgnoresTheLockFile(t *testing.T) {
-	dir := t.TempDir()
-	repoDir := filepath.Join(dir, "FreeBSD-ports")
-	if err := os.MkdirAll(repoDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+// HANDOFF §4.9. A change confined to a file jmj never reads cannot alter the
+// snapshot, so a reload owed to one is owed to nothing.
+func TestRepoWatcherIgnoresFilesItNeverReads(t *testing.T) {
+	for name := range ignoredNames {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			repoDir := filepath.Join(dir, "FreeBSD-ports")
+			if err := os.MkdirAll(repoDir, 0755); err != nil {
+				t.Fatal(err)
+			}
 
-	spy := newReloadSpy()
-	startRepoWatcher(t, dir, spy)
+			spy := newReloadSpy()
+			startRepoWatcher(t, dir, spy)
 
-	// pkg taking the repository lock, on its own.
-	for i := 0; i < 3; i++ {
-		if err := os.WriteFile(filepath.Join(repoDir, repoLockFile), nil, 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	time.Sleep(4 * testSettle)
-	if calls, _ := spy.counts(); calls != 0 {
-		t.Errorf("reloads = %d after lock activity alone, want 0", calls)
-	}
+			for i := 0; i < 3; i++ {
+				if err := os.WriteFile(filepath.Join(repoDir, name), []byte{byte(i)}, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			time.Sleep(4 * testSettle)
+			if calls, _ := spy.counts(); calls != 0 {
+				t.Errorf("reloads = %d after %s activity alone, want 0", calls, name)
+			}
 
-	// The catalogue itself still reloads, and the earlier lock events must
-	// not have consumed the one reload it is owed.
-	if err := os.WriteFile(filepath.Join(repoDir, repoDBFile), []byte("catalogue"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	waitForSignal(t, spy.reloaded, "the reload for the catalogue write")
-
-	time.Sleep(4 * testSettle)
-	if calls, _ := spy.counts(); calls != 1 {
-		t.Errorf("reloads = %d, want exactly 1 -- the catalogue write and nothing else", calls)
+			// And the ignored events must not have consumed the reload the
+			// catalogue is owed.
+			if err := os.WriteFile(filepath.Join(repoDir, repoDBFile), []byte("catalogue"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			waitForSignal(t, spy.reloaded, "the reload for the catalogue write")
+			time.Sleep(4 * testSettle)
+			if calls, _ := spy.counts(); calls != 1 {
+				t.Errorf("reloads = %d, want exactly 1 -- the catalogue write and nothing else", calls)
+			}
+		})
 	}
 }
 
-// The real sequence, in order: lock, meta, a long silence, then the rewrite.
-// Exactly one reload, and it must land after the catalogue is written rather
-// than during the silence.
+// The measured sequence, in order: lock, meta, a long silence while 73 MB
+// downloads, then the rewrite. **Exactly one** reload, and it lands after the
+// catalogue is written rather than during the silence.
+//
+// This is the case §4.9 is about, and the first attempt at the fix -- ignoring
+// only `lock` -- passed every other test here while failing this one on the
+// real host: meta is written immediately after the lock and armed the timer
+// before the same gap.
 func TestRepoWatcherReloadsOncePerUpdateSequence(t *testing.T) {
 	dir := t.TempDir()
 	repoDir := filepath.Join(dir, "FreeBSD-ports")
@@ -196,27 +202,24 @@ func TestRepoWatcherReloadsOncePerUpdateSequence(t *testing.T) {
 		}
 	}
 
-	write(repoLockFile, "")
+	write("lock", "")
 	write("meta", "version 2")
-	// The download: pkg writes nothing here for eleven seconds on the real
-	// host, which is several settle delays.
-	time.Sleep(3 * testSettle)
 
-	// meta armed the timer, so one reload is expected by now and it is not
-	// the spurious one -- meta really did change.
-	afterMeta, _ := spy.counts()
+	// The download. pkg writes nothing under repo_db_dir for 11.2s on the
+	// real host; here that is several settle delays, which is what matters.
+	time.Sleep(4 * testSettle)
+	if calls, _ := spy.counts(); calls != 0 {
+		t.Fatalf("reloads = %d during the download, want 0: nothing has changed yet", calls)
+	}
 
+	// The rewrite: a temp file, the rename, then the writes.
+	write("db-pkgtemp", "the old catalogue, moved aside")
 	write(repoDBFile, "the new catalogue")
 	waitForSignal(t, spy.reloaded, "the reload for the rewritten catalogue")
-	time.Sleep(4 * testSettle)
 
-	total, _ := spy.counts()
-	if total != afterMeta+1 {
-		t.Errorf("reloads = %d, want %d: the rewrite is owed exactly one more than meta already caused",
-			total, afterMeta+1)
-	}
-	if total > 2 {
-		t.Errorf("reloads = %d for one update sequence, want at most 2", total)
+	time.Sleep(4 * testSettle)
+	if calls, _ := spy.counts(); calls != 1 {
+		t.Errorf("reloads = %d for one pkg update, want exactly 1", calls)
 	}
 }
 

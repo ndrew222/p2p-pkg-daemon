@@ -28,10 +28,25 @@ import (
 // case. Nothing outside a test writes it.
 var repoSettleDelay = 2 * time.Second
 
-// repoLockFile is pkg's per-repository lock, repo_db_dir/<repo>/lock. It is the
-// one name the watcher ignores; see loop for why, and HANDOFF §4.9 for the
-// measurement.
-const repoLockFile = "lock"
+// ignoredNames are the files under repo_db_dir/<repo>/ that do not arm the
+// settle timer (HANDOFF §4.9).
+//
+// The test for membership is not "pkg writes this during an update" -- pkg
+// writes the catalogue during an update too. It is: CAN A CHANGE CONFINED TO
+// THIS FILE ALTER OUR SNAPSHOT? Reload reads `<repo>/db` and nothing else --
+// the packages table via loadRepositoryDatabase, the repodata table via
+// loadRepositorySource -- so for these two the answer is no, and a reload owed
+// to them is a reload owed to nothing.
+//
+//	lock  pkg's per-repository lock. A mutex; it carries no data at all.
+//	meta  the repository's meta.conf. Real metadata, and real to PKG -- but we
+//	      never open it, and what we do read lives in db.
+//
+// Both are measured to be written ELEVEN SECONDS before pkg touches the
+// catalogue: it takes the lock, writes meta, downloads in silence, and only
+// then rewrites db. Arming on either fires the timer inside that silence and
+// reloads the catalogue already in memory.
+var ignoredNames = map[string]bool{"lock": true, "meta": true}
 
 // RepoWatcher reloads the repository database when pkg rewrites it (ADR-008,
 // HANDOFF §5.2).
@@ -157,26 +172,18 @@ func (w *RepoWatcher) loop() {
 			if !ok {
 				return
 			}
-			// One name is ignored and everything else counts, whatever its
-			// op: the reload reads the whole tree anyway, and the settle
-			// delay is what makes guessing at pkg's layout unnecessary.
+			// Two names are ignored and everything else counts, whatever
+			// its op: the reload reads the whole tree anyway, and the
+			// settle delay is what makes guessing at pkg's layout
+			// unnecessary. See ignoredNames for the test they fail.
 			//
-			// The exception is repo_db_dir/<repo>/lock, and it is measured
-			// rather than assumed (HANDOFF §4.9). pkg takes that lock
-			// ELEVEN SECONDS before it writes anything: it touches lock,
-			// writes meta, then downloads in silence, and only then
-			// rewrites the catalogue. Counting the lock therefore fires
-			// the timer inside that silence and reloads the catalogue we
-			// already have -- 38,052 rows for nothing, a re-announce
-			// nobody needed, and a log line claiming a reload eleven
-			// seconds before the change.
-			//
-			// It is safe to ignore because a lock file is a mutex: it
-			// carries no catalogue data, so no reload can ever be owed to
-			// it. meta is NOT ignored -- it is repository metadata pkg
-			// rewrites when the repository changes, and one reload we did
-			// not need is far cheaper than missing one we did.
-			if filepath.Base(event.Name) == repoLockFile {
+			// A DIRECTORY is never ignored -- its name is the repository's,
+			// which is not in the set -- so a repository appearing still
+			// arms the timer, and the re-walk after that reload is what
+			// puts a watch on it. That path is the one this exclusion could
+			// plausibly break, and TestRepoWatcherPicksUpARepositoryAdded
+			// AfterStart is what holds it.
+			if ignoredNames[filepath.Base(event.Name)] {
 				continue
 			}
 			if timer != nil {

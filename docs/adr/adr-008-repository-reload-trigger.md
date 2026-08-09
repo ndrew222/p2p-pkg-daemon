@@ -102,10 +102,10 @@ below the same way.
   *inside* a catalogue rewrite is 0.48s, so a two-second timer cannot fire
   mid-write. See the amendment below.
 
-- **Every event counts except one, and the exception is measured.**
-  `repo_db_dir/<repo>/lock` is ignored; everything else arms the timer whatever
-  its op. See the amendment below — this replaces the original wording, which
-  admitted no exceptions.
+- **Every event counts except events on files the daemon never reads.**
+  `<repo>/lock` and `<repo>/meta` are ignored; everything else arms the timer
+  whatever its op. See the amendment below — this replaces the original wording,
+  which admitted no exceptions.
 
 - **A failed reload is not fatal and must not discard the snapshot.** Failure at
   *startup* stays fatal, for the reason `openRepositoriesLocked` already gives:
@@ -189,21 +189,41 @@ real rewrite.
 
 ### What changes
 
-**`repo_db_dir/<repo>/lock` no longer arms the settle timer.** Everything else
-still does, whatever its op.
+**`repo_db_dir/<repo>/lock` and `<repo>/meta` no longer arm the settle timer.**
+Everything else still does, whatever its op.
 
 The original wording — *"every event under `repo_db_dir` counts, whatever its
 op; the watcher does not try to tell a catalogue rewrite from a journal file
 being created"* — was written to avoid guessing at pkg's file layout, and that
-caution was right at the time. The layout is now measured, and one name can be
-excluded on a principle rather than a guess: **a lock file is a mutex and
-carries no catalogue data, so no reload can ever be owed to it.**
+caution was right at the time. What replaces it is not a better guess about pkg
+but a fact about **us**:
 
-**`meta` is deliberately not excluded.** It is repository metadata that pkg
-rewrites when the repository changes, so a reload prompted by it is defensible
-even when redundant. One reload we did not need is far cheaper than missing one
-we did, and that asymmetry is the reason the exclusion list is one entry long
-and should stay that way.
+> **Reload reads `<repo>/db` and nothing else** — the `packages` table via
+> `loadRepositoryDatabase`, the `repodata` table via `loadRepositorySource`. A
+> change confined to a file we never open cannot alter our snapshot, so a reload
+> owed to one is a reload owed to nothing.
+
+`lock` is a mutex and carries no data at all. `meta` is genuine repository
+metadata — to *pkg*. We do not read it, and everything we do read lives in `db`.
+
+**This is deliberately not a rule about which files pkg writes during an
+update**, which would be the guess the original wording refused: pkg writes the
+catalogue during an update too. It is a rule about which files this daemon
+consumes, and it is checkable against our own code rather than against pkg's
+behaviour.
+
+**A directory is never ignored**, because its name is the repository's and is
+not in the set. A repository appearing therefore still arms the timer, and the
+re-walk after that reload is what puts a watch on it — the one path this
+exclusion could plausibly have broken.
+
+**First attempt, recorded because the lesson is the point:** excluding only
+`lock` was implemented, tested and committed, and did **not** fix the symptom.
+`meta` is written immediately after the lock and armed the timer before the same
+11.2-second silence, so the host still showed two reloads per update, twenty
+seconds apart. It was caught by re-measuring on the host rather than by any
+test, and the test that now covers it asserts the whole sequence produces
+**exactly one** reload rather than asserting the exclusion in isolation.
 
 ### What does not change
 
