@@ -456,6 +456,30 @@ repository jmj does not front, which its `upstream_url` cannot serve. That path
 is unreachable under ADR-007 — pkg never asks — but a successful hash lookup is
 **not** proof the upstream will answer, and the rework must not assume it is.
 
+### 4.7 What ADR-002's two concurrency limits are called — **RULED** (owner, 2026-08-09)
+
+ADR-002 says both caps "are configurable" and names neither key, and
+`internal/config` has no key for either. That is a gap of exactly the kind
+ground rule 3 forbids an agent filling — §4.5 spent a session on the same shape
+of question — so it was put to the owner rather than guessed.
+
+**Ruled:**
+
+| Key | Meaning | Type | Default |
+|---|---|---|---|
+| `max_concurrent_seeds` | Global cap on simultaneous seeds | int | `0` = unlimited |
+| `max_concurrent_seeds_per_ip` | Per-remote-IP cap | int | `0` = unlimited |
+
+`_per_ip` names the identity source deliberately, and it is the one ADR-002
+already fixes: the host half of `r.RemoteAddr` via `net.SplitHostPort`, **never**
+a header. `0` means the default behaviour is unchanged and an operator opts in,
+which is ADR-002's own position — the hostile-peer expectation justifies the
+mechanism, not a number, and nobody has measured one.
+
+Implemented with §5.3. This closes the last unnamed thing in ADR-002; the ADR
+itself is unchanged, since `docs/` is spec territory and this is a naming
+ruling, not a new decision.
+
 ## 5. Work, in order
 
 ### 5.1 Config schema — **DONE**
@@ -480,11 +504,21 @@ Three things it must carry that are easy to lose:
 - **Both ADR-002 semaphores** — global and per-remote-IP — replying `503`.
   Remote identity is the host half of `r.RemoteAddr` via `net.SplitHostPort`,
   never a header. `503` must not trigger the UC-06 §5b re-announce, and must not
-  carry `Retry-After`.
+  carry `Retry-After`. The config keys are **`max_concurrent_seeds`** and
+  **`max_concurrent_seeds_per_ip`**, ruled at §4.7 — do not rename them.
 - **The size bound as real code**: `io.LimitReader(body, expectedSize+1)` plus
   the `Content-Length` check.
 - **Constant memory on both ends.** A `[]byte` in either signature is a
   regression, and is what currently OOMs a 1 GiB host on the 2.83 GiB package.
+
+**§5.3 and §5.7 are being worked concurrently** (owner direction, 2026-08-09),
+on `worktree-peer-wire-v0.2` and `worktree-facade-rework`. They are different
+wires and the file sets barely overlap, but there is one seam: §5.3 changes
+`FetchFromPeer`/`FetchFirst` to return an open `*os.File` rather than `[]byte`,
+and `facade.go`'s peer-fetch call site is what §5.7 rewrites. **§5.7 codes
+against the v0.2 signature** — the one the migration table already mandates — so
+neither side invents the contract. §5.3 merges first, because it owns the
+signature.
 
 **Do not delete `internal/peerwire` before that size bound is in place.**
 `MaxPayload` (`wire.go:24`, enforced at `:53`) is today the *only* length check
