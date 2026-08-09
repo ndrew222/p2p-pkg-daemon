@@ -12,11 +12,10 @@ the branch now sits on `c791d9b`. **Not merged** — left for review.
 
 | Commit | What |
 |---|---|
-| `dab151e` | Fetch from upstream on a peer miss (ADR-003): narrowed `404`/`502`, the safe path join, `Facade.UpstreamURL` and its wiring, and the peer path served from `peer.FetchFirst`'s open file |
-| `2a69522` | Relay non-package paths to upstream (ADR-005), `If-Modified-Since` and `304` included |
-| (this one) | HANDOFF §5.7/§6/§4.8 and this log |
-
-| `TBD-race` | Fix a data race in `startDiscoveryLocked` — §5.3's, found by the `-race` run; see below |
+| 1 | `dab151e` — fetch from upstream on a peer miss (ADR-003): narrowed `404`/`502`, the safe path join, `Facade.UpstreamURL` and its wiring, and the peer path served from `peer.FetchFirst`'s open file |
+| 2 | `2a69522` — relay non-package paths to upstream (ADR-005), `If-Modified-Since` and `304` included |
+| 3 | HANDOFF §5.7/§6/§4.8 and this log |
+| 4 | Fix a data race in `startDiscoveryLocked` — **§5.3's, not this work's**, found by the `-race` run; see below |
 
 Gate after each: `go build ./... && go vet ./... && go test ./...` green,
 `gofmt -l .` silent. `go test ./... -race` is green as of the last commit and

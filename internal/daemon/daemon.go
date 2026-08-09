@@ -159,13 +159,23 @@ func (d *Daemon) startDiscoveryLocked() error {
 	// dozens of dependencies, each firing an fsnotify event) collapses into
 	// a single pending re-announce instead of dozens.
 	changed := make(chan struct{}, 1)
-	d.reannounce = func() {
+	nudge := func() {
 		select {
 		case changed <- struct{}{}:
 		default: // a re-announce is already pending; it will pick this up too
 		}
 	}
-	onChange := func(ChangeEvent) { d.reannounce() }
+	d.reannounce = nudge
+	// The watcher calls the local closure, NOT d.reannounce. Reading that
+	// field from the watcher's goroutine races stopDiscoveryLocked clearing
+	// it, on any run where a cache event and a shutdown overlap. The
+	// indirection through the field exists for the SEED SERVER, which
+	// outlives a discovery restart and so has to re-read it under the lock
+	// (requestReannounce); the watcher does not outlive one -- the same call
+	// replaces both it and the keep-alive -- so holding this keep-alive's
+	// nudge directly is both race-free and the more accurate thing for it to
+	// hold.
+	onChange := func(ChangeEvent) { nudge() }
 
 	// The watcher now has a real repository database, so SanityFilter does
 	// the size comparison it was written for: a cached file whose size does
