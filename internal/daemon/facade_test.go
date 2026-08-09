@@ -117,6 +117,7 @@ type upstreamRequest struct {
 	Path   string
 	Query  string
 	IMS    string
+	UA     string
 }
 
 func startUpstream(t *testing.T, h http.HandlerFunc) *upstreamStub {
@@ -129,6 +130,7 @@ func startUpstream(t *testing.T, h http.HandlerFunc) *upstreamStub {
 			Path:   r.URL.Path,
 			Query:  r.URL.RawQuery,
 			IMS:    r.Header.Get("If-Modified-Since"),
+			UA:     r.Header.Get("User-Agent"),
 		})
 		u.mu.Unlock()
 		h(w, r)
@@ -968,6 +970,78 @@ func TestFacadeUnwritableTempDirWithNoUpstreamIs502(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502; 500 is not in the facade's status set (ADR-009)", rec.Code)
+	}
+}
+
+// §4.8(c), ruled 2026-08-09: pkg's User-Agent is relayed verbatim so a mirror
+// sees exactly what it would see without jmj on the path. Measured (§7.3), pkg
+// 2.7.5 sends "pkg/2.7.5" on catalogue requests and "fetch libfetch/2.0" on
+// package fetches -- two different strings, which is the reason for relaying
+// rather than hardcoding one.
+func TestFacadeRelaysTheUserAgent(t *testing.T) {
+	const pkgName = "nginx-1.24.0_2"
+	content := []byte("package bytes")
+
+	tests := []struct {
+		name   string
+		path   string
+		ua     string
+		wantUA string
+	}{
+		{
+			name:   "catalogue request carries pkg's own agent",
+			path:   "/packagesite.pkg",
+			ua:     "pkg/2.7.5",
+			wantUA: "pkg/2.7.5",
+		},
+		{
+			name:   "package fetch carries libfetch's",
+			path:   "/latest/All/nginx-1.24.0_2.pkg",
+			ua:     "fetch libfetch/2.0",
+			wantUA: "fetch libfetch/2.0",
+		},
+		{
+			// Not "Go-http-client/1.1": the facade relays what pkg sent
+			// and invents nothing when pkg sent nothing.
+			name:   "no agent from pkg means no agent upstream",
+			path:   "/packagesite.pkg",
+			ua:     "",
+			wantUA: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			up := startUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write(content)
+			})
+			f := &Facade{
+				Peers:       fakeLister{},
+				Repo:        fakeRepo{pkgName: {hash: sha256Hex(content), size: int64(len(content))}},
+				TempDir:     t.TempDir(),
+				UpstreamURL: up.URL,
+			}
+
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			// httptest.NewRequest sets no User-Agent, so an empty value
+			// here really does reach the facade as absent.
+			if tc.ua != "" {
+				req.Header.Set("User-Agent", tc.ua)
+			}
+			rec := httptest.NewRecorder()
+			f.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			got := up.requests()
+			if len(got) != 1 {
+				t.Fatalf("upstream saw %d requests, want 1: %+v", len(got), got)
+			}
+			if got[0].UA != tc.wantUA {
+				t.Errorf("upstream User-Agent = %q, want %q", got[0].UA, tc.wantUA)
+			}
+		})
 	}
 }
 

@@ -530,13 +530,25 @@ func relayHeaders(dst, src http.Header) {
 // The request context is pkg's, so a client that hangs up cancels the upstream
 // fetch rather than leaving it running against the mirror.
 //
-// One request header crosses the boundary and only one: If-Modified-Since,
-// which ADR-005 names. The package path does not even send that, because the
-// facade must answer a package request identically whether the bytes come from
-// a peer or from upstream and a peer cannot honour a conditional GET.
-// Forwarding anything further is unspecified, so it is not done -- measured,
-// pkg 2.7.5 sends no Range and no HEAD (§7.3), so there is nothing else the
-// mirror needs to hear from pkg.
+// Two request headers cross the boundary, with different scopes.
+//
+// If-Modified-Since, which ADR-005 names, on the METADATA path only. The
+// package path does not send it, because the facade must answer a package
+// request identically whether the bytes come from a peer or from upstream and
+// a peer cannot honour a conditional GET.
+//
+// User-Agent on BOTH, relayed verbatim, and suppressed entirely when pkg sent
+// none rather than falling back to Go's default. Measured (§7.3), pkg 2.7.5
+// sends "pkg/2.7.5" on catalogue requests and "fetch libfetch/2.0" on package
+// fetches; relaying them means a mirror sees exactly what it would see without
+// jmj on the path, and invents no string. The peer-versus-upstream symmetry
+// argument does not reach this header: it does not change the bytes, so a
+// mirror's client counts stay right without making the two sources differ in
+// anything pkg can observe. Ruled at HANDOFF §4.8(c).
+//
+// Nothing else is forwarded. Measured, pkg 2.7.5 sends no Range and no HEAD
+// (§7.3), and Accept-Encoding is the upstream client's own business -- see
+// upstreamTransport.
 func (f *Facade) fetchUpstream(r *http.Request, reqPath, rawQuery string, conditional bool) (*http.Response, error) {
 	target, err := upstreamURL(f.UpstreamURL, reqPath, rawQuery)
 	if err != nil {
@@ -550,6 +562,14 @@ func (f *Facade) fetchUpstream(r *http.Request, reqPath, rawQuery string, condit
 		if ims := r.Header.Get("If-Modified-Since"); ims != "" {
 			req.Header.Set("If-Modified-Since", ims)
 		}
+	}
+	if ua := r.Header.Get("User-Agent"); ua != "" {
+		req.Header.Set("User-Agent", ua)
+	} else {
+		// A nil entry is net/http's way of sending no User-Agent at all.
+		// Leaving the header absent would make the transport substitute
+		// "Go-http-client/…", which is a client this request is not.
+		req.Header["User-Agent"] = nil
 	}
 	return upstreamClient.Do(req)
 }
