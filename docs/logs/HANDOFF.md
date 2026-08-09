@@ -59,24 +59,27 @@ ADR-005, ADR-006 and its implementation, ADR-007, `docs/uc-07.puml` and
 `CLAUDE.md`.
 
 ADR-001 through -007 are all Approved. **§5.3 (the peer wire migration and the
-cache-backed seeder) and §5.4 (mounting both servers) are done.** §5.7, the
-facade rework, is the next work item.
+cache-backed seeder), §5.4 (mounting both servers) and §5.7 (the facade
+rework) are all done.** There is no large open work item.
 
 **§4.4, §4.5 and §4.6 are all closed** (ADR-005, ADR-006 and ADR-007, ruled
 2026-08-08) and **§4.7 is ruled** (the two ADR-002 config key names,
-2026-08-09). §5.7 — the facade rework — is unblocked and is now the largest open
-item.
+2026-08-09).
 
-**One question is with the owner**, raised while implementing §5.3: the peer
-spec contradicts itself on whether a non-exact path is `400` or `404`. See §5.3
-and `docs/logs/claude-peer-wire-v0.2.md`. Nothing is blocked on it.
+**Two things are with the owner, and nothing is blocked on either.** Raised
+implementing §5.3: the peer spec contradicts itself on whether a non-exact path
+is `400` or `404` — see §5.3 and `docs/logs/claude-peer-wire-v0.2.md`. Raised by
+§5.7: four judgement calls awaiting ratification, at **§4.8**. One of those,
+§4.8(a), is a **direct disagreement between the two pieces of work** — whether
+an unwritable `temp_dir` is a `500` to pkg or a fall-through to upstream — and
+it is the one worth reading first.
 
-Read before starting §5.7: ADR-003 (fetch semantics), ADR-004 (path rule),
-ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj fronts
-one repository and coexists with the rest). The key exists, validates and
-expands; nothing consumes it yet. ADR-007 carries one trap into the rework: a
-successful repository-database lookup is **not** proof the upstream can serve
-that package.
+Read before touching the facade: ADR-003 (fetch semantics), ADR-004 (path
+rule), ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj
+fronts one repository and coexists with the rest). `upstream_url` is now
+consumed. ADR-007's trap survives the rework and is honoured in code rather
+than assumed away: a successful repository-database lookup is **not** proof the
+upstream can serve that package.
 
 ## 1. Document map — what to trust
 
@@ -95,7 +98,7 @@ that package.
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
 | `docs/peer-transfer-spec-v0.2.md` | Current **and implemented** (§5.3, mounted in §5.4). Its migration table and definition of done are both discharged. One self-contradiction is open with the owner — `400` vs `404` for a non-exact path; see §5.3. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
-| `docs/uc-07.puml` | Current, **not implemented**. New — UC-07 had no diagram before ADR-005. Carries the relay flow, the 304 branch and the terminal `502`. |
+| `docs/uc-07.puml` | Current **and implemented** as of §5.7. Carries the relay flow, the 304 branch and the terminal `502`; `internal/daemon/facade.go` is the code for it. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
 | `docs/uc-06.puml` | Current as of the HTTP peer wire, **and implemented** (§5.3/§5.4). |
 
@@ -163,8 +166,10 @@ Gate passes. What exists and works:
 - `internal/daemon/repodb.go` — `Repositories`, the repository database reader
   (§5.2). Read-only in-memory snapshot of every catalogue under `repo_db_dir`.
 - `internal/daemon/facade.go` — the mirror facade handler, **mounted on
-  `facade_addr`**. Spools through `temp_dir`; skips and marks blacklisted peers
-  via `peer.FetchFirst`.
+  `facade_addr`**, reworked under ADR-003/004/005/006/007 (§5.7). Peer path
+  spools through `temp_dir` via `peer.FetchFirst` and serves from the handle it
+  returns; upstream path streams from `upstream_url`; non-package paths are
+  relayed, `If-Modified-Since` and all. Skips and marks blacklisted peers.
 - `internal/peer` — fetch and seed over the v0.2 HTTP wire (§5.3). The seeder
   is an `http.Server` with ADR-002's two caps; the requester spools to
   `temp_dir` and returns an open file. `internal/peerwire` is deleted.
@@ -496,6 +501,44 @@ one is warned about rather than corrected — it can never fire, so it is dead
 configuration and most likely a transposition, but which number the operator
 meant is not ours to guess.
 
+### 4.8 Four judgement calls the §5.7 rework made — **awaiting ratification**
+
+Raised 2026-08-09 by the facade rework. **None of these blocks anything** and
+none of them is a silent resolution of a stated ambiguity: each is a place
+where the ADRs settle the *rule* and leave a mechanism detail unstated, and the
+choice made is recorded here so it is ratified or overturned rather than
+inherited. Full reasoning in `docs/logs/claude-facade-rework.md`.
+
+| # | Call made | Why, and what overturning it costs |
+|---|---|---|
+| a | **`500` is no longer a facade status.** An unwritable `temp_dir` (`peer.ErrSpool`) used to be a `500`; it now falls through to upstream like any other peer-path failure. **§5.3 took the opposite view** — see below. | ADR-003's rebuilt table has no `500` row, and its governing rule says *every* peer-side failure goes to upstream and an error reaches pkg only when both sources are gone. The upstream path does not touch `temp_dir`, so it can still serve. Overturning it means pkg fails an install the daemon could have served, in exchange for a louder signal about a broken `temp_dir` — which is in the log either way. |
+| b | **The query string is relayed** on the metadata branch. | Faithful relay of what pkg asked for. No ADR mentions queries and no measured pkg request carried one, so this is unobservable today; it costs nothing either way and is stated only because it is a difference between "relay the path" and "relay the request". |
+| c | **Exactly one request header is forwarded upstream** — `If-Modified-Since`, the one ADR-005 names. Not `User-Agent`, not `Accept-Encoding`, not `Range`. | Forwarding more is unspecified, and pkg 2.7.5 sends no `Range` and no `HEAD` (§7.3). The visible cost is that mirror operators see Go's default user-agent rather than pkg's, which matters if anyone is counting clients. |
+| d | **Transparent gzip is disabled on the upstream client.** | Left on, Go's transport adds its own `Accept-Encoding`, gunzips the response and drops `Content-Length` — so the facade would hand pkg bytes that are not the bytes upstream sent, which ADR-005's "unmodified" forbids and which on the package path could not match `packages.cksum`. The cost is that catalogue transfers are not compressed in transit. **§5.3 reached the same conclusion independently** on the peer wire, for the same reason. |
+
+#### (a) is a disagreement between two pieces of work, not just an unstated mechanism
+
+Worth separating from the other three, because two shipped components now say
+opposite things and only one can be right.
+
+- `internal/peer`'s `ErrSpool` doc: the error is distinguished *"so the facade
+  can answer 5xx — 'this daemon is broken' — rather than 'no peer has it'"*,
+  and §5.3's interim edit to `facade.go` did answer `500`.
+- `internal/daemon/facade.go` as reworked: `ErrSpool` goes to upstream, because
+  ADR-003's table has no `500` and its governing rule reserves an error to pkg
+  for the case where **both** sources have failed. A broken `temp_dir` does not
+  stop the upstream path.
+
+Neither position is an ADR. **The facade owns the status codes**, so its reading
+is what shipped, and the disagreement is recorded here rather than resolved by
+whichever file was written second. What is at stake: with the fall-through, a
+daemon whose `temp_dir` is broken keeps installs working and degrades silently
+into a plain proxy (loudly logged, but only logged); with the `500`, the
+operator finds out immediately and every install fails until they fix it.
+**Unblocks:** one sentence from the owner. **Cost of leaving it:** the two files
+disagree in comments, and a later reader may "fix" one to match the other
+without knowing a choice was made.
+
 ## 5. Work, in order
 
 ### 5.1 Config schema — **DONE**
@@ -589,23 +632,34 @@ rather than assigning a possibly-nil pointer into the interface field.
 
 ### 5.6 §4.1 cache-layout cross-check — **CLOSED** by §7.5.
 
-### 5.7 Facade rework under ADR-003/005/006 — **UNBLOCKED as of 2026-08-08**
+### 5.7 Facade rework under ADR-003/005/006 — **DONE** (2026-08-09)
 
-> **The two rulings this section waited on have landed** — §4.4 as ADR-005
-> (the facade proxies metadata) and §4.5 as ADR-006 (`upstream_url`, required,
-> no default, `${ABI}` expanded at startup). The "do not start" below is
-> **lifted**; the description of *why the file is wrong* is still accurate and
-> is why it needs a rewrite rather than an edit.
+> **Delivered** on `worktree-facade-rework`, rebased onto §5.3; work log at
+> `docs/logs/claude-facade-rework.md`. Every scope item landed:
 >
-> Scope, now fully specified: the upstream fetch path (streaming, no spool, no
-> `[]byte`), the metadata branch (relay from upstream, including `304`, instead
-> of today's `404`), the narrowed `404`/`502` semantics, `If-Modified-Since`
-> relay, safe joining of a client-supplied path onto the upstream base, and the
-> contract comment at the top of the file. The tests that encode the retired
-> contract go with it — `facade_test.go:91`, `:189`, `:354`, and
-> `daemon_test.go:187`, which uses a metadata path as its probe.
+> - Upstream fetch on a peer miss, **streamed** — no spool, no `[]byte`.
+> - The metadata branch relays from upstream, with `If-Modified-Since`
+>   forwarded and `304` relayed unchanged (never synthesised).
+> - `404` narrowed to "provably absent from the repository database", `502` to
+>   "peers *and* upstream both failed". `500` is gone — see §4.8(a), which is
+>   the one open disagreement.
+> - Safe join of a client-supplied path onto the upstream base
+>   (`upstreamURL`), with a containment test table.
+> - The contract comment at the top of the file rewritten around the five ADRs.
+> - The four retired tests replaced, not deleted — `facade_test.go`'s metadata
+>   `404`, `no peers` `404`, `all peers exhausted` `502` and the over-the-wire
+>   metadata refusal, plus `daemon_test.go`'s probe, which now asserts a
+>   relayed body (the old probe would pass against a facade wired to no
+>   upstream at all).
 >
-> `cfg.UpstreamURL` is ready to consume: populated, validated, expanded.
+> **The peer path is now streaming end to end**, which it was not while the two
+> branches were in flight: `peer.FetchFirst` returns an open, rewound,
+> already-verified file, the facade copies straight from that handle to pkg,
+> and `peer.Discard` closes and removes it. No `[]byte` anywhere on the path,
+> and the seam stand-in that stood in for this is gone.
+>
+> Open items are at **§4.8**, and the work log's *Uncertainties* section carries
+> the reasoning.
 
 #### Historical framing (kept — it explains why the file is wrong)
 
@@ -639,9 +693,11 @@ no `[]byte` — ADR-003), the narrowed `404`/`502` semantics, `If-Modified-Since
 relay (§6), and the contract comment at the top of the file. The document
 corrections that used to be listed here are **done** — see §1.
 
-A marker is in the file itself; `grep -rn 'SUPERSEDED (HANDOFF §5.7)' internal/`
-finds it. (It read `BLOCKED` until the rulings landed; the older grep string
-appears in commit messages and finds nothing now.)
+~~A marker is in the file itself; `grep -rn 'SUPERSEDED (HANDOFF §5.7)'
+internal/` finds it.~~ The marker is **gone with the rewrite**, along with the
+`BLOCKED` string that preceded it, and with the `SEAM (HANDOFF §5.3` marker that
+briefly replaced it. All three appear in commit messages and in this document
+and find nothing in `internal/` now.
 
 ## 6. Known defects
 
@@ -656,20 +712,18 @@ appears in commit messages and finds nothing now.)
   connection-refused, which correctly did *not* blacklist us — a dial failure
   never does — so it cost one wasted attempt per peer and was invisible on our
   side.
-- **`internal/daemon/facade.go` implements a superseded model.** Its tests pass,
-  which is misleading: they encode the old contract, so green tests mean it is
-  consistently wrong rather than correct. **No longer blocked** — the rulings it
-  waited on landed on 2026-08-08 — it awaits the §5.7 rewrite. Note that ADR-005
-  has now made the *metadata* branch a known defect rather than an open
-  question: it answers `404`, which §7.1 measured breaks `pkg update` outright,
-  and it must relay from upstream instead. The
-  tests that encode the refusal (`facade_test.go:91`, `:189`, `:354`, and
-  `daemon_test.go:187`, which uses a metadata path as its probe) go with it.
-- **The facade has no answer for `If-Modified-Since`.** pkg sends conditional
-  `GET`s for catalogue files. Ignoring the header wastes catalogue bandwidth on
-  every `pkg update`; answering `304` from a guess would serve a stale
-  catalogue. ADR-003's proxying resolves this for free and ADR-005 now requires
-  the relay explicitly, but it is unimplemented.
+- ~~**`internal/daemon/facade.go` implements a superseded model.**~~ **FIXED by
+  the §5.7 rewrite** (2026-08-09). It fetches from upstream on a peer miss and
+  relays non-package paths, and the tests that encoded the retired contract were
+  rewritten rather than deleted. With §5.3 merged there is **no residue**: the
+  peer path streams end to end, from `peer.FetchFirst`'s open file straight to
+  pkg, with no `[]byte` anywhere on it.
+- ~~**The facade has no answer for `If-Modified-Since`.**~~ **FIXED** as part of
+  §5.7's metadata branch. pkg's conditional `GET` is forwarded to the upstream
+  mirror and upstream's `304` is relayed unchanged, never synthesised — the
+  daemon tracks no upstream modification times, and a guess would serve a stale
+  catalogue. Tested at `facade_test.go`'s
+  `TestFacadeRelaysConditionalGetAnd304`.
 
 ## 7. Empirical findings — §7.1–§7.5 are ANSWERED
 

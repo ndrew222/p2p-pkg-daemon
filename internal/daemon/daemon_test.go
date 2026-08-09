@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -184,15 +183,28 @@ func freePort(t *testing.T) string {
 // stock "404 page not found" for every request and no package could ever be
 // fetched through it.
 //
-// A metadata path is the probe: it is the one request the facade answers
-// without contacting a peer, and its body is distinguishable from the empty
-// mux's, which is what proves the handler is ours.
+// The probe is a metadata path answered by a stand-in upstream, which under
+// ADR-005 is what `pkg update` does through the real daemon. It used to be the
+// same path expecting the facade's 404 refusal -- a probe that would now pass
+// against a facade wired to nothing at all, since the refusal needed no
+// upstream. Relayed bytes cannot be produced by an empty mux or by a facade
+// whose upstream is unset, so this proves the wiring end to end: config →
+// Facade.UpstreamURL → the mirror.
 func TestFacadeIsMountedOnFacadeAddr(t *testing.T) {
+	const catalogue = "signed catalogue bytes"
 	cacheDir := t.TempDir()
 	repoDir := t.TempDir()
 	writeRepoDB(t, repoDir, "FreeBSD-ports", []fixtureRow{
 		{"nginx", "1.24.0_2", 1234, hash64('a')},
 	})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/stable/FreeBSD:15:amd64/latest/meta.conf" {
+			t.Errorf("upstream got %q, want the path pkg asked for", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, catalogue)
+	}))
+	t.Cleanup(upstream.Close)
 
 	tracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -210,6 +222,9 @@ func TestFacadeIsMountedOnFacadeAddr(t *testing.T) {
 			CacheDir:    cacheDir,
 			RepoDBDir:   repoDir,
 			TempDir:     t.TempDir(),
+			// ADR-006: required, no default, ${ABI} already expanded by
+			// the time the daemon starts.
+			UpstreamURL: upstream.URL,
 		},
 		running: true,
 	}
@@ -247,11 +262,11 @@ func TestFacadeIsMountedOnFacadeAddr(t *testing.T) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 relayed from upstream", resp.StatusCode)
 	}
-	if !strings.Contains(string(body), "this mirror serves package files only") {
-		t.Errorf("body = %q; want the facade's metadata refusal, not the empty mux's 404", body)
+	if string(body) != catalogue {
+		t.Errorf("body = %q; want the relayed catalogue, not the empty mux's 404", body)
 	}
 }
 

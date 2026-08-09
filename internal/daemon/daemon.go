@@ -159,13 +159,23 @@ func (d *Daemon) startDiscoveryLocked() error {
 	// dozens of dependencies, each firing an fsnotify event) collapses into
 	// a single pending re-announce instead of dozens.
 	changed := make(chan struct{}, 1)
-	d.reannounce = func() {
+	nudge := func() {
 		select {
 		case changed <- struct{}{}:
 		default: // a re-announce is already pending; it will pick this up too
 		}
 	}
-	onChange := func(ChangeEvent) { d.reannounce() }
+	d.reannounce = nudge
+	// The watcher calls the local closure, NOT d.reannounce. Reading that
+	// field from the watcher's goroutine races stopDiscoveryLocked clearing
+	// it, on any run where a cache event and a shutdown overlap. The
+	// indirection through the field exists for the SEED SERVER, which
+	// outlives a discovery restart and so has to re-read it under the lock
+	// (requestReannounce); the watcher does not outlive one -- the same call
+	// replaces both it and the keep-alive -- so holding this keep-alive's
+	// nudge directly is both race-free and the more accurate thing for it to
+	// hold.
+	onChange := func(ChangeEvent) { nudge() }
 
 	// The watcher now has a real repository database, so SanityFilter does
 	// the size comparison it was written for: a cached file whose size does
@@ -323,10 +333,14 @@ func (d *Daemon) startHTTPServerLocked() error {
 	// advisory, so the cost is at most one wasted transfer per bad peer,
 	// and end-to-end hash verification -- not the blacklist -- is what makes
 	// corrupt bytes impossible.
+	// UpstreamURL is what makes the facade able to answer at all when no peer
+	// can serve (ADR-003). It is required, has no default, and has had ${ABI}
+	// expanded against this host by the time we get here (ADR-006).
 	facade := &Facade{
-		Peers:   d.client,
-		Repo:    d.repository(),
-		TempDir: d.config.TempDir,
+		Peers:       d.client,
+		Repo:        d.repository(),
+		TempDir:     d.config.TempDir,
+		UpstreamURL: d.config.UpstreamURL,
 	}
 	if err := facade.Check(); err != nil {
 		return fmt.Errorf("mirror facade: %w", err)
