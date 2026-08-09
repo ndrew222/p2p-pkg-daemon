@@ -554,19 +554,41 @@ without knowing a choice was made.
 
 ### 5.2 Repository database reader — **DONE**
 
-One follow-up remains: **nothing triggers `Reload()`**. `pkg update` rewrites the
-catalogues, so a long-running daemon goes stale and starts answering `404` for
-packages added since startup — and under ADR-003 that `404` ends the install
-rather than falling through. `Reload()` exists and is tested; wiring a trigger
-was unclaimed.
+~~One follow-up remains: **nothing triggers `Reload()`**.~~ **Closed 2026-08-09.**
+`pkg update` rewrites the catalogues, so a long-running daemon went stale and
+started answering `404` for packages added since startup — and under ADR-003
+that `404` ends the install rather than falling through.
 
 ~~Choosing between a watch on `repo_db_dir` and a periodic reload is a design
-decision in no spec — **ask before picking**.~~ **Ruled 2026-08-09: `fsnotify`,
-recorded as `docs/adr/adr-008-repository-reload-trigger.md` (Approved).** The
-ADR also settles what is watched (directories, re-walked on every reload), the
-settle delay, that a runtime reload failure keeps the previous snapshot, and
-that a successful reload nudges a re-announce. Implementation is the remaining
-work.
+decision in no spec — **ask before picking**.~~ **Ruled: `fsnotify`**, recorded
+as `docs/adr/adr-008-repository-reload-trigger.md` (Approved) and implemented as
+`internal/daemon/repowatcher.go`. Work log:
+`docs/logs/claude-repodb-reload.md`.
+
+Four things about it that are decisions, not incidentals:
+
+- **Directories are watched, never the `db` files.** On kqueue a file watch
+  follows the inode, so a catalogue replaced by a rename would leave the watch
+  pointing at a dead file, silently and for the life of the process. The watch
+  set is also rebuilt after every reload attempt, which is what makes it correct
+  on inotify and kqueue without depending on either one's rename semantics.
+- **`repo_db_dir` stays read-only.** A missing directory is refused, never
+  created. `TestRepoWatcherStartRefusesAndCreatesNothing` is the regression test.
+- **A runtime reload failure keeps the previous snapshot** and does not
+  re-announce. `Repositories.Reload` already returned before its swap on every
+  error path; that is now stated in its doc comment and pinned by
+  `TestReloadFailureKeepsThePreviousSnapshot`.
+- **A successful reload re-announces**, because the keep-alive rescans the cache
+  and re-applies `SanityFilter` on every announce. This is the case the ruling
+  was actually about: a cached file dropped for disagreeing with the *superseded*
+  sizes is never revisited by a cache event, since nothing about the file
+  changed. `TestCatalogueRewriteReachesTheTracker` covers it end to end.
+
+The watcher's lifetime is discovery's — SIGHUP already restarts discovery on a
+superset of the conditions that stale it. It holds the `*Repositories` and the
+nudge closure it was given rather than reading `d.repo` or `d.reannounce` from
+its own goroutine, which is the §5.3 race shape and is why `-race -count=2` ran
+green on it before the merge.
 
 ### 5.3 Peer wire migration — **DONE**
 

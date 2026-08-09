@@ -74,9 +74,14 @@ func OpenRepositories(dir string) (*Repositories, error) {
 }
 
 // Reload rebuilds the snapshot from disk. pkg rewrites these files on
-// `pkg update`, so a long-running daemon's snapshot goes stale; nothing calls
-// this yet (the cache watcher watches the package cache, not the catalogues),
-// and wiring a trigger is follow-up work.
+// `pkg update`, so a long-running daemon's snapshot goes stale; RepoWatcher is
+// the trigger (ADR-008), and SIGHUP calls it too when repo_db_dir moves.
+//
+// A FAILED RELOAD LEAVES THE PREVIOUS SNAPSHOT INTACT, and ADR-008 depends on
+// that: at runtime the daemon has a working catalogue and the alternative to
+// keeping a stale one is having none. Every error below returns before the
+// swap, which is what makes that true; TestReloadFailureKeepsThePreviousSnapshot
+// is the regression test.
 func (r *Repositories) Reload() error {
 	paths, err := repositoryDatabases(r.dir)
 	if err != nil {

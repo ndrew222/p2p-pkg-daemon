@@ -383,3 +383,31 @@ func TestReloadPicksUpANewPackage(t *testing.T) {
 		t.Error("Reload() did not pick up the new package")
 	}
 }
+
+// ADR-008 relies on this: at runtime a reload failure logs and keeps what it
+// has, because the alternative to a stale catalogue is no catalogue at all.
+func TestReloadFailureKeepsThePreviousSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	writeRepoDB(t, dir, "FreeBSD-ports", []fixtureRow{{"nginx", "1.24.0_2", 1234, hash64('a')}})
+
+	repo, err := OpenRepositories(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every catalogue disappears -- the shape of a reload that lands
+	// mid-rewrite.
+	if err := os.RemoveAll(filepath.Join(dir, "FreeBSD-ports")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Reload(); err == nil {
+		t.Fatal("Reload() = nil for a directory with no catalogue, want an error")
+	}
+
+	if _, ok := repo.ExpectedHash("nginx-1.24.0_2"); !ok {
+		t.Error("a failed Reload discarded the previous snapshot")
+	}
+	if got := repo.Len(); got != 1 {
+		t.Errorf("Len() = %d after a failed Reload, want 1", got)
+	}
+}

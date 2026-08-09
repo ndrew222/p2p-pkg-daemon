@@ -146,6 +146,124 @@ func TestCacheChangeReachesTheTracker(t *testing.T) {
 	}
 }
 
+// ADR-008 end to end, and specifically the case the ruling was about: a cached
+// file that SanityFilter dropped because the catalogue had never heard of it.
+// No cache event will ever revisit that file -- nothing about it changes -- so
+// without a reload that re-announces, the daemon under-announces until restart.
+func TestCatalogueRewriteReachesTheTracker(t *testing.T) {
+	previousSettle := repoSettleDelay
+	repoSettleDelay = testSettle
+	t.Cleanup(func() { repoSettleDelay = previousSettle })
+
+	cacheDir := t.TempDir()
+	repoDBDir := t.TempDir()
+
+	// The catalogue knows nginx; the cache holds curl. writePackage writes
+	// 13 bytes, which is the size the rewritten catalogue will claim.
+	writeRepoDB(t, repoDBDir, "FreeBSD-ports", []fixtureRow{
+		{"nginx", "1.24.0_2", 13, hash64('a')},
+	})
+	writePackage(t, cacheDir, "curl-8.6.0.pkg")
+
+	announces := make(chan proto.AnnounceRequest, 32)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/announce" {
+			body, _ := io.ReadAll(r.Body)
+			var req proto.AnnounceRequest
+			if err := json.Unmarshal(body, &req); err == nil {
+				select {
+				case announces <- req:
+				default:
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ack"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	d := &Daemon{
+		config: &config.DaemonConfig{
+			TrackerURL:  srv.URL,
+			FacadeAddr:  "127.0.0.1:9001",
+			ServingAddr: "0.0.0.0:9002",
+			CacheDir:    cacheDir,
+			RepoDBDir:   repoDBDir,
+		},
+	}
+
+	d.mu.Lock()
+	err := d.openRepositoriesLocked()
+	if err == nil {
+		err = d.startDiscoveryLocked()
+	}
+	d.mu.Unlock()
+	if err != nil {
+		t.Fatalf("startup: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+
+	first := waitForAnnounce(t, announces)
+	if len(first.Packages) != 0 {
+		t.Fatalf("startup announce = %v, want an empty list: curl is not in the catalogue yet", first.Packages)
+	}
+
+	// `pkg update`: the catalogue is replaced, and now lists curl.
+	if err := os.RemoveAll(filepath.Join(repoDBDir, "FreeBSD-ports")); err != nil {
+		t.Fatal(err)
+	}
+	writeRepoDB(t, repoDBDir, "FreeBSD-ports", []fixtureRow{
+		{"nginx", "1.24.0_2", 13, hash64('a')},
+		{"curl", "8.6.0", 13, hash64('d')},
+	})
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case req := <-announces:
+			if slices.Contains(req.Packages, "curl-8.6.0") {
+				return // reload -> rescan -> re-announce
+			}
+		case <-deadline:
+			t.Fatal("the rewritten catalogue never reached the tracker")
+		}
+	}
+}
+
+// The repository watcher's lifetime is discovery's, because SIGHUP restarts
+// discovery on a superset of the conditions that stale it.
+func TestRepoWatcherLifetimeIsDiscoverys(t *testing.T) {
+	repoDBDir := t.TempDir()
+	writeRepoDB(t, repoDBDir, "FreeBSD-ports", []fixtureRow{{"nginx", "1.24.0_2", 13, hash64('a')}})
+
+	d := &Daemon{
+		config: &config.DaemonConfig{
+			TrackerURL:  "http://127.0.0.1:1",
+			FacadeAddr:  "127.0.0.1:9001",
+			ServingAddr: "0.0.0.0:9002",
+			CacheDir:    t.TempDir(),
+			RepoDBDir:   repoDBDir,
+		},
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.openRepositoriesLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startDiscoveryLocked(); err != nil {
+		t.Fatalf("startDiscoveryLocked() = %v", err)
+	}
+	if d.repoWatcher == nil {
+		t.Fatal("discovery started without a repository watcher")
+	}
+	d.stopDiscoveryLocked()
+	if d.repoWatcher != nil {
+		t.Error("stopDiscoveryLocked left the repository watcher behind")
+	}
+}
+
 func waitForAnnounce(t *testing.T, ch <-chan proto.AnnounceRequest) proto.AnnounceRequest {
 	t.Helper()
 	select {

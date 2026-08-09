@@ -21,10 +21,13 @@ type Daemon struct {
 	configPath string
 	client     *discovery.Client
 	watcher    *Watcher
-	repo       *Repositories
-	done       chan struct{} // closed to stop the keep-alive loop
-	httpServer *http.Server
-	seedServer *peer.Server
+	// repoWatcher reloads repo after pkg rewrites the catalogue (ADR-008).
+	// Started and stopped with the cache watcher and the keep-alive.
+	repoWatcher *RepoWatcher
+	repo        *Repositories
+	done        chan struct{} // closed to stop the keep-alive loop
+	httpServer  *http.Server
+	seedServer  *peer.Server
 	// seedListener is held separately so shutdown is deterministic. Serve
 	// runs in a goroutine, so closing only the server would leave a window
 	// in which the listener is still bound and the replacement cannot take
@@ -187,6 +190,45 @@ func (d *Daemon) startDiscoveryLocked() error {
 		return fmt.Errorf("cache watcher: %w", err)
 	}
 
+	// The repository-database watcher (ADR-008). Its lifetime is discovery's
+	// because SIGHUP restarts discovery on a superset of the conditions that
+	// stale it -- including a repo_db_dir change, which is what replaces the
+	// *Repositories it reloads.
+	//
+	// It closes over the instance captured here rather than reading d.repo
+	// from its own goroutine, and calls the local nudge rather than
+	// d.reannounce, for the reason spelled out above: both fields are
+	// rewritten under d.mu and reading either one unlocked from a watcher
+	// goroutine is the shape of the race §5.3 shipped.
+	//
+	// The nudge is what makes a reload reach the announce: the keep-alive
+	// rescans the cache on every announce and re-applies SanityFilter against
+	// the current catalogue, so a cached file dropped for disagreeing with
+	// the superseded sizes gets its second look. No cache event would ever
+	// give it one -- nothing about the file changed.
+	if repo := d.repo; repo != nil {
+		repoDBDir := d.config.RepoDBDir
+		d.repoWatcher = NewRepoWatcher(repoDBDir, func() error {
+			if err := repo.Reload(); err != nil {
+				return err
+			}
+			log.Printf("Repository database reloaded: %d packages from %s", repo.Len(), repoDBDir)
+			return nil
+		}, nudge)
+		if err := d.repoWatcher.Start(); err != nil {
+			d.repoWatcher = nil
+			d.watcher.Stop()
+			d.watcher = nil
+			return fmt.Errorf("repository database watcher: %w", err)
+		}
+	} else {
+		// Unreachable in a running daemon: openRepositoriesLocked is fatal
+		// and runs first, and startHTTPServerLocked refuses without a
+		// catalogue. Stated rather than assumed, because a test can reach
+		// this and a silent skip would look like the watcher working.
+		log.Printf("Repository database watcher not started: no catalogue is open")
+	}
+
 	d.client = discovery.New(d.config.TrackerURL)
 	d.done = make(chan struct{})
 
@@ -307,6 +349,10 @@ func (d *Daemon) stopDiscoveryLocked() {
 	if d.watcher != nil {
 		d.watcher.Stop()
 		d.watcher = nil
+	}
+	if d.repoWatcher != nil {
+		d.repoWatcher.Stop()
+		d.repoWatcher = nil
 	}
 }
 
