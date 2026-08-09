@@ -71,6 +71,30 @@ type DaemonConfig struct {
 	// expanded at STARTUP and never at generation time, so a config stays
 	// portable between hosts -- see ExpandUpstream.
 	UpstreamURL string `json:"upstream_url"`
+
+	// MaxConcurrentSeeds bounds how many peer transfers this daemon serves
+	// at once, across all requesters (ADR-002). MaxConcurrentSeedsPerIP
+	// bounds how many any single remote IP may hold. Either limit being
+	// full answers 503 immediately -- no queueing, no waiting, no
+	// Retry-After -- because the requester has other holders to try and
+	// pkg's own mirror behind those, so a refusal is a fast fall-through
+	// where a wait would be a stall.
+	//
+	// BOTH DEFAULT TO 0, MEANING UNLIMITED, and that is deliberate.
+	// AGENTS.md asks for a real observed problem before a control of this
+	// family. The hostile-peer expectation justifies building the
+	// mechanism; it does not justify a number, and nobody has measured
+	// one. At 0 the default behaviour is unchanged and an operator opts in.
+	//
+	// The key names are an owner ruling of 2026-08-09, recorded at
+	// HANDOFF.md §4.7 -- ADR-002 itself left them unnamed. Do not rename
+	// them.
+	//
+	// Negative is a configuration error rather than a synonym for
+	// unlimited: 0 already says that, and silently accepting -1 would hide
+	// a typo in an arithmetic expression that produced it.
+	MaxConcurrentSeeds      int `json:"max_concurrent_seeds"`
+	MaxConcurrentSeedsPerIP int `json:"max_concurrent_seeds_per_ip"`
 }
 
 // DefaultConfig returns a config with hardcoded defaults.
@@ -94,6 +118,11 @@ func DefaultConfig() *DaemonConfig {
 		// FreeBSD-ports and FreeBSD-ports-kmods, so this is a
 		// directory to scan and not a single file to open.
 		RepoDBDir: "/var/db/pkg/repos",
+		// Both seeding caps default to 0 = unlimited (ADR-002). Unlike
+		// UpstreamURL this default is safe to state, because it is the
+		// behaviour the daemon already had before the caps existed.
+		MaxConcurrentSeeds:      0,
+		MaxConcurrentSeedsPerIP: 0,
 		// UpstreamURL is deliberately absent. It is the one field with no
 		// default: see its doc comment and ADR-006. Leaving it empty here
 		// is what makes -generate-config fail without -upstream, which is
@@ -270,6 +299,20 @@ func ValidateFields(cfg *DaemonConfig) error {
 		return err
 	}
 
+	// ADR-002's two seeding caps. 0 is unlimited; anything below that is a
+	// mistake, not a stronger form of unlimited.
+	if cfg.MaxConcurrentSeeds < 0 {
+		return fmt.Errorf("max_concurrent_seeds must be >= 0 (0 means unlimited), got %d", cfg.MaxConcurrentSeeds)
+	}
+	if cfg.MaxConcurrentSeedsPerIP < 0 {
+		return fmt.Errorf("max_concurrent_seeds_per_ip must be >= 0 (0 means unlimited), got %d", cfg.MaxConcurrentSeedsPerIP)
+	}
+	// A per-IP cap above the global one can never fire, so it is almost
+	// certainly a transposition of the two values. Not fatal -- the
+	// combination is well defined and the global cap simply binds first --
+	// but worth reporting, because ADR-002 requires diagnostics good enough
+	// to tell an attack from a misconfigured ceiling. See Warnings.
+
 	return nil
 }
 
@@ -324,6 +367,13 @@ func Warnings(cfg *DaemonConfig) []string {
 	// early detection, which is warning-shaped.
 	if u, err := url.ParseRequestURI(cfg.UpstreamURL); err == nil && u.Scheme == "http" {
 		out = append(out, fmt.Sprintf("upstream_url %q is plaintext http; prefer https. Tampering is still caught (pkg checks the catalogue signature, jmj checks package hashes), but the transfer is readable in transit", cfg.UpstreamURL))
+	}
+	// A per-IP cap that cannot bind is dead configuration: the global cap
+	// refuses first in every case. Reported rather than corrected, because
+	// which of the two numbers the operator meant is not ours to guess.
+	if cfg.MaxConcurrentSeeds > 0 && cfg.MaxConcurrentSeedsPerIP > cfg.MaxConcurrentSeeds {
+		out = append(out, fmt.Sprintf("max_concurrent_seeds_per_ip (%d) exceeds max_concurrent_seeds (%d), so the per-IP cap can never fire; the two values may be transposed",
+			cfg.MaxConcurrentSeedsPerIP, cfg.MaxConcurrentSeeds))
 	}
 	return out
 }

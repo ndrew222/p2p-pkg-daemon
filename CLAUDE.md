@@ -28,7 +28,7 @@ gofmt -l .                                        # must print nothing; no linte
 ```sh
 go test ./internal/daemon/                                  # one package
 go test ./internal/daemon/ -run TestFacadeStatusCodes -v     # one test
-go test ./internal/peerwire/ -run FuzzReadMessage -fuzz FuzzReadMessage  # fuzz (corpus in testdata/)
+go test ./internal/peer/ -run FuzzSeederHTTPSurface -fuzz FuzzSeederHTTPSurface  # fuzz the seeder's HTTP surface
 plantuml -checkonly docs/uc-02.puml                          # before committing a diagram
 ```
 
@@ -73,8 +73,9 @@ The peer namespace is deliberately unlike the facade's so that a seeding daemon 
 - `internal/tracker` — in-memory peer table keyed IP:port, expiry sweeper. Never relays bytes, never verifies content.
 - `internal/discovery` — tracker client plus the keep-alive loop. Announce lists are **always full replacements, never deltas**.
 - `internal/daemon` — `daemon.go` (lifecycle/wiring), `watcher.go` (cache watcher), `repodb.go` (`Repositories`: read-only snapshot of every SQLite catalogue under `repo_db_dir`, via `modernc.org/sqlite`), `facade.go` (the pkg-facing handler), `repository.go` (composite of the narrow interfaces).
-- `internal/peer` — `fetch.go`/`download.go` (requester), `serve.go` (seeder), `blacklist.go` (local-only, in-memory, no expiry, whole-peer; nothing is reported to the tracker).
-- `internal/peerwire` — **deprecated**, interim length-prefixed binary framing. To be deleted, not extended.
+- `internal/peer` — the daemon↔daemon wire (`docs/peer-transfer-spec-v0.2.md`). `fetch.go`/`download.go` (requester: streams to a temp file, hashes incrementally, returns an open `*os.File`), `serve.go` (seeder: an `http.Server` over `PackageSource`, serving from open handles via `http.ServeContent`), `limit.go` (ADR-002's two non-blocking semaphores and the `503`), `blacklist.go` (local-only, in-memory, no expiry, whole-peer; nothing is reported to the tracker).
+- `internal/daemon/cachesource.go` — the production `peer.PackageSource`: opens `<cache_dir>/<name-version>.pkg` read-only. It is also the path-safety boundary, because `peer.validName` deliberately is not one.
+- `internal/peerwire` — **deleted** with the v0.2 wire. Do not reintroduce it.
 
 Do not create new top-level directories without asking.
 
@@ -87,8 +88,8 @@ The daemon writes **only** to its own `temp_dir`. The pkg cache and the reposito
 ## Current state — read HANDOFF.md before picking anything up
 
 - **`internal/daemon/facade.go` is frozen (HANDOFF §5.7).** It implements a model that was *measured false*: it returns an HTTP error on a peer miss, assuming pkg falls through to another mirror. pkg does not — fall-through happens between mirrors within a repository, never between repositories, so a facade error ends the install. **Its tests pass, which is misleading**: they encode the old contract, so green means consistently wrong, not correct. **No longer blocked** — ADR-005 and ADR-006 landed on 2026-08-08 and it awaits a rewrite, not an edit. Its metadata branch answers `404`; the facade proxies metadata. The path rule in that file is unaffected and correct — do not "fix" it.
-- **The seed half does not exist.** No production `PackageSource` implementation is in the tree; the only implementors are test fakes and `cmd/demo`'s in-memory store. The daemon announces a serving port nothing listens on.
-- **§5.3 (peer wire migration) is the next work item and is fully unblocked** — and it is a build, not just a migration. Deleting `internal/peerwire` before its size bound is replaced is explicitly forbidden: `MaxPayload` is today the only length check on the fetch path.
+- **§5.3 and §5.4 are done.** The peer wire is HTTP (`GET /pkg/<name-version>`), the seed half exists (`daemon.CacheSource` + `peer.Server`) and is **mounted on `serving_addr`**, `internal/peerwire` is gone, and the size bound is the exact `pkgsize`/`cksum` pair from the repository database rather than a constant. **§5.7, the facade rework, is the next work item.**
+- **One question is with the owner**, raised implementing §5.3: `peer-transfer-spec-v0.2.md` says a non-exact path is `404` in its *Request surface* prose and `400` in its *Responses* table. Implemented as `400` — `404` carries the UC-06 §5b re-announce obligation, so answering it to a malformed path would let a hostile peer drive our announce traffic. See HANDOFF §5.3.
 - `docs/mirror-facade-spec-v0.1.md` is **deprecated** — history only, never binding, superseded by ADR-003/ADR-004. There is no v0.2 and none is planned. Do not implement from it or cite it as a contract.
 - Deprecated vocabulary: anything referencing IPFS, CIDs, or `peer_id`. Packages are addressed by `name-version` (e.g. `nginx-1.24.0_2`). Flag such code if you find it; do not extend it.
 
