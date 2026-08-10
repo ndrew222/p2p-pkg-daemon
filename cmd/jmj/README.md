@@ -107,6 +107,10 @@ No flags are required. The daemon discovers what it can serve by watching
 `cache_dir`; an empty cache is fine, it simply stays quiet until there is
 something to announce. `SIGHUP` reloads the config without a restart.
 
+To see it working — configured as a pkg repository, serving a real
+`pkg install`, and fetching from a peer on another machine — follow
+`docs/logs/claude-demo-guide.md` §2. Every command in it has been run.
+
 At startup — not at generation time — the daemon checks the config against the
 machine it is on: `temp_dir` is created if absent and probed for writability,
 and `cache_dir` and `repo_db_dir` must already exist, because pkg's cache and
