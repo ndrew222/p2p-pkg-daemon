@@ -1267,6 +1267,81 @@ with:
 > `SanityFilter` takes the size-only interface so that the announce path
 > *cannot* hash, which the merged type would not preserve. Do not merge them. |
 
+### 9.3 `docs/use-case-descriptions.md` — six edits, from an audit on 2026-08-10
+
+The use cases were audited against the ADRs and the merged code. **UC-02 and
+UC-07 are current** — including the parts that are easiest to get wrong: UC-02
+§9f's claim that the length promised to pkg is `packages.pkgsize` from the same
+row as the hash is exactly what `internal/daemon/facade.go` does, and the file
+cites §9f back. UC-05's ping suppression (§8) matches `keepalive.go`. Nothing
+contradicts ADR-003, ADR-005 or ADR-009, and no retired vocabulary survives.
+
+What is missing is everything decided *after* the ADR-003/005 rewrite. Ordered
+by how much it costs to leave.
+
+**(a) UC-01 never mentions `repo_db_dir`** — the highest-value edit. It is a
+required config key, must already exist, is never created, is read-only, and the
+daemon **refuses to start without it**; it is also the sole source of every
+expected hash and size. UC-01 step 7 and error state 2 name `temp_dir` and
+`cache_dir` and stop there.
+
+In step 7, after *"the pkg cache directory must already exist and is never
+created, because it is read-only to the daemon"*, add:
+
+> The same is true of `repo_db_dir`, pkg's repository catalogues: it must already
+> exist, it is never created, and it is opened read-only. A daemon that cannot
+> read it does not start — without a catalogue it could verify nothing and would
+> answer `404` to every request.
+
+and extend error state 2 to *"(temp directory not writable, pkg cache directory
+missing, **repository database directory missing**)"*, with the same addition to
+flow 7b.
+
+**(b) UC-06 has no `503`** — ADR-002 is Approved, implemented, and was measured
+firing over a real link (§7.11). The serving use case lists three error states
+and admission control is not among them. Add a fourth:
+
+> | | 4 | At capacity — either `max_concurrent_seeds` or `max_concurrent_seeds_per_ip` is full |
+
+with an alternative flow:
+
+> | | **Error State:** At capacity | |
+> | | 2d | A semaphore is full: the global cap, or the cap for this remote IP. Identity is the connection's source address, never a header |
+> | | 3d | Answer `503` **immediately** — no queueing, and no `Retry-After`. The requester has other holders and pkg's mirror behind them, so refusing fast is cheaper for it than waiting |
+> | | 4d | **Do not re-announce.** Unlike the `404` at 5b, a `503` says nothing about what this daemon holds; treating it as drift would let load drive announce traffic |
+
+**(c) UC-05's trigger list is missing the catalogue reload** (ADR-008). A
+successful reload re-announces, and that is not a detail — it is the case the
+ruling was *about*: a cached file dropped for disagreeing with superseded sizes
+is never revisited by a cache event, because nothing about the file changed. Add
+to **Trigger**:
+
+> A successful reload of the repository database (ADR-008), which re-applies the
+> sanity filter against the new catalogue and so may add or drop packages that no
+> cache event would ever revisit.
+
+**(d) UC-01 never mentions the two concurrency keys.** `max_concurrent_seeds`
+and `max_concurrent_seeds_per_ip` (§4.7) are config, and UC-01 is the
+configuration use case. One clause in *Assumptions* suffices:
+
+> `max_concurrent_seeds` and `max_concurrent_seeds_per_ip` bound simultaneous
+> seeds in total and per remote IP; both default to `0`, meaning unlimited, so
+> the default behaviour is unchanged and an operator opts in.
+
+**(e) UC-07 carries two stale pointers.** Its precondition says *"how it is
+configured is HANDOFF §4.5"* — §4.5 was ruled on 2026-08-08; it is **ADR-006**
+and the key is `upstream_url`. Its Assumptions say *"a draft bug report
+exists"* for the `mirror_type: http` segfault; the report is **complete and
+fileable** at `docs/logs/freebsd-bug-report-pkg-mirror-type-http.md`.
+
+**(f) Nothing else.** ADR-009 needs no edit — UC-02 already reserves `502` for
+"peers and upstream both failed" and mentions no `500` anywhere. ADR-010 is
+internal to the catalogue merge and has no use-case-visible behaviour. And
+UC-02's *"pkg's only HTTP mirror"* is **correct as written**: it is ADR-003's own
+vocabulary, and UC-02's fall-through paragraph draws the mirror-versus-repository
+distinction properly. It is recorded here as checked, not as a gap — §4.6 was
+lost to inventing exactly that problem.
+
 ## Suggested skills
 
 - **`graphify`** — mandated by `CLAUDE.md`. Run `graphify query "<question>"`
