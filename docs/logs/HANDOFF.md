@@ -45,9 +45,13 @@ commit as the work.
   this explicitly. One reviewable change per commit, with a message explaining
   *why*, not just what.
 - **graphify.** `graphify query "<question>"` before reading or grepping source;
-  `graphify update .` after changing code. See `CLAUDE.md`. **Caveat:** neither
-  the binary nor `CLAUDE.md` is present in every environment, and the graph is
-  stale for some commits. If you have the tool, re-run it.
+  `graphify update .` after changing code. See `CLAUDE.md`. **Caveat, corrected
+  2026-08-10:** the workflow depends on `graphify-out/graph.json`, and **this
+  repository does not have one yet** — a build was in flight on 2026-08-10 and
+  left no graph behind. Check for the file before assuming either way; read and
+  grep source directly when it is absent. (An earlier note in `CLAUDE.md` said
+  the binary had no `query` or `update` subcommands. It has both; that note was
+  wrong and is gone.)
 - **Gate:** `go build ./... && go vet ./... && go test ./...`, plus `gofmt`.
   Tracker code and tests must run on any OS — no FreeBSD, no `pkg`, no second
   machine.
@@ -75,6 +79,12 @@ and §5.7 (the facade rework) are all done.** There is no large open work item.
 it costs to run: five seconds and no dependencies at one end, two machines at
 the other. Every transcript in it was produced on the date it names.
 
+**Two root files exist as of 2026-08-10, both non-binding orientation:**
+`README.md` (what the project is, for a human arriving cold) and `TESTING.md`
+(which layer proves what, the use-case→evidence matrix, the adversarial cases,
+and what is deliberately not tested). `TESTING.md` is the right place to check
+before claiming coverage; it points at the guide rather than duplicating it.
+
 **Every item in §4 is closed.** §4.4, §4.5 and §4.6 by ADR-005, ADR-006 and
 ADR-007 (2026-08-08); §4.7, the two ADR-002 config key names, by owner ruling
 (2026-08-09); and **all four of §4.8's judgement calls ruled 2026-08-09** — (a)
@@ -83,9 +93,10 @@ relayed, (b) and (d) ratified exactly as they shipped.
 
 **Nothing is with the owner as a question.** §5.3's one open item — whether a
 non-exact path on the peer wire is `400` or `404` — was **ruled `400`
-(2026-08-10)**, which is what shipped. This document is the citable source, as
-it is for §4.7; the spec's prose still says `404` in one place and only the owner
-can edit `docs/`, so it is listed under §9 with replacement text.
+(2026-08-10)**, which is what shipped, **and the spec now says so in both
+places**: every §9 edit was applied on 2026-08-10 under a one-off owner
+permission to edit `docs/`. Cite `peer-transfer-spec-v0.2.md` itself. This
+document remains the citable source for §4.7, whose key names live nowhere else.
 
 Both items the host round raised were ruled on 2026-08-10 and are fixed —
 **§4.9** (the watcher ignores pkg's lock file; ADR-008 carries a dated
@@ -137,7 +148,7 @@ upstream can serve that package.
 | `docs/adr/adr-009-facade-status-set.md` | **Approved.** The facade's status set is exhaustive and has no `500`; `peer.ErrSpool` is a peer-path failure and goes to upstream. Closes §4.8(a) and settles the §5.3/§5.7 disagreement. |
 | `docs/adr/adr-010-own-catalogue-preference.md` | **Approved.** On a name-version collision the row from this daemon's own repository wins, identified by a loopback source URL; path order remains the fallback. Closes §4.10. |
 | `docs/tracker-protocol-spec-v0.2.md` | Current **and implemented**. daemon↔tracker. |
-| `docs/peer-transfer-spec-v0.2.md` | Current **and implemented** (§5.3, mounted in §5.4). Its migration table and definition of done are both discharged. One self-contradiction is open with the owner — `400` vs `404` for a non-exact path; see §5.3. |
+| `docs/peer-transfer-spec-v0.2.md` | Current **and implemented** (§5.3, mounted in §5.4). Its migration table and definition of done are both discharged. The `400`-vs-`404` self-contradiction is **fixed in the spec itself** (2026-08-10, §9.1), as is the `PackageHashes`/`RepositoryDatabase` row (§9.2). Cite the spec, not §5.3. |
 | `docs/uc-05.puml`, `docs/keepalive.md` | Current and implemented. |
 | `docs/uc-07.puml` | Current **and implemented** as of §5.7. Carries the relay flow, the 304 branch and the terminal `502`; `internal/daemon/facade.go` is the code for it. |
 | `docs/uc-01.puml`, `cmd/jmj/README.md` | Current as of the two-address config and `repo_db_dir`. |
@@ -151,6 +162,7 @@ deleted, so the reasoning that changed stays visible.
 
 | Document | What changed |
 |---|---|
+| `docs/use-case-descriptions.md` (2026-08-10, §9.3) | UC-01 carries `repo_db_dir` and the two seeding caps; UC-05's trigger carries the catalogue reload; UC-06 has ADR-002's `503` as a fourth error state with its own flow; UC-07's two stale pointers are corrected. `uc-05.puml` and `uc-06.puml` were updated to match and re-rendered. |
 | `docs/use-case-descriptions.md` UC-02 | Description, precondition, error-state list and the assumptions paragraph now carry the ADR-003 model. New alternative flow **8f–10f (upstream fallback)** and error state **9g–11g (upstream also failed → terminal `502`)**. Flows 6a/7a, 7b/8b and 9d/10d no longer end in "pkg tries its next mirror" — they route to 8f. |
 | `docs/mirror-facade-spec-v0.1.md` | **Now DEPRECATED outright** — see below. It was first corrected in place (proxy-with-fallback, asymmetric verification, rebuilt status table), then deprecated by the owner once ADR-003 was confirmed as its successor. Read it as history only. |
 | `docs/uc-02.puml` | New `Upstream Mirror` participant and an `opt no verified bytes from any peer` block carrying both outcomes. Renders clean (`plantuml -checkonly`). |
@@ -1213,17 +1225,24 @@ Added 2026-08-09, from the host round:
   subsequent writes go unseen. Watch directories. This is ADR-008 and it now has
   evidence, not just an argument.
 
-## 9. Spec edits waiting on the owner
+## 9. Spec edits — **ALL APPLIED 2026-08-10**
 
-Two places where `docs/` still contradicts a ruling. **Agents do not modify
-specs** (`AGENTS.md`), so both are recorded here with the exact replacement text
-rather than applied. Neither blocks anything and neither needs code: the code is
-already on the ruled side of both.
+These were places where `docs/` still contradicted a ruling. They were recorded
+here with exact replacement text rather than applied, because **agents do not
+modify specs** (`AGENTS.md`). **The owner granted a one-off permission to edit
+`docs/` outside `docs/logs/` on 2026-08-10, on the condition that it landed as a
+single revertible commit, and every item below is now applied** —
+`docs/logs/claude-doc-sync-and-testing-doc.md` is the work log.
 
-Until they land, **this document is the citable source for both** — cite §5.3
-and §4.3, not the spec text they contradict.
+**Cite the specs again, not this section.** They no longer contradict the
+rulings. The numbers are retained because other documents cite them; the
+replacement text is retained so the diff can be checked against what was
+authorised. Two diagram edits the prose edits implied were made in the same
+commit: `uc-06.puml` gained the `503` branch (with no re-announce arrow) and
+`uc-05.puml`'s trigger note gained the catalogue reload. Both were rendered and
+inspected.
 
-### 9.1 `docs/peer-transfer-spec-v0.2.md`, *Request surface* — `404` should be `400`
+### 9.1 `docs/peer-transfer-spec-v0.2.md`, *Request surface* — `404` should be `400` — **APPLIED**
 
 The third bullet under *Consequences of the split* says a non-exact path is a
 `404`; the *Responses* table says `400`, and `400` was ruled canonical on
@@ -1242,7 +1261,7 @@ with:
 >   evidence about what this daemon holds — answering one would let a hostile
 >   peer drive our announce traffic. (Ruled 2026-08-10; `HANDOFF.md` §5.3.)
 
-### 9.2 `docs/peer-transfer-spec-v0.2.md`, *Deliberately unspecified* — a row that is no longer open
+### 9.2 `docs/peer-transfer-spec-v0.2.md`, *Deliberately unspecified* — a row that is no longer open — **APPLIED**
 
 The table still invites an agent to merge `PackageHashes` and
 `RepositoryDatabase`, and even argues for it. That was decided the other way
@@ -1267,7 +1286,7 @@ with:
 > `SanityFilter` takes the size-only interface so that the announce path
 > *cannot* hash, which the merged type would not preserve. Do not merge them. |
 
-### 9.3 `docs/use-case-descriptions.md` — six edits, from an audit on 2026-08-10
+### 9.3 `docs/use-case-descriptions.md` — six edits, from an audit on 2026-08-10 — **(a)–(e) APPLIED; (f) was never an edit**
 
 The use cases were audited against the ADRs and the merged code. **UC-02 and
 UC-07 are current** — including the parts that are easiest to get wrong: UC-02
@@ -1344,9 +1363,10 @@ lost to inventing exactly that problem.
 
 ## Suggested skills
 
-- **`graphify`** — mandated by `CLAUDE.md`. Run `graphify query "<question>"`
-  before reading or grepping source, and `graphify update .` after changing
-  code. Start here for orientation rather than browsing `internal/` by hand.
+- **`graphify`** — mandated by `CLAUDE.md`, and conditional on
+  `graphify-out/graph.json` existing, which it does not yet (§0). When it does:
+  `graphify query "<question>"` before reading or grepping source, and
+  `graphify update .` after changing code.
 - **`/code-review`** — §5.3 is the largest code change in the project's history:
   it deletes a package, rewrites four files and two test files, and builds a
   seeder from nothing. Review before requesting a merge.

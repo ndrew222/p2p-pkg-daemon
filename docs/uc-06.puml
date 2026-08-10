@@ -15,6 +15,14 @@ note right of Daemon : An ordinary HTTP server on the port\nannounced to the tra
 Daemon -> Daemon : validateRequest()
 note right : Network input from an UNTRUSTED\nremote daemon — not user input,\nso not pkg's job. Malformed or\nhostile requests must be rejected\nwithout crashing. The fuzz target is\nthis HTTP surface end to end: arbitrary\nbytes in, never a panic. Request framing\nitself is now the stdlib's job.
 
+Daemon -> Daemon : admissionControl()
+note right : ADR-002, and AFTER validation, so a\nmalformed request never consumes a slot.\nTwo non-blocking semaphores: a global cap\nand a per-remote-IP cap, both 0 = unlimited\nby default. Remote identity is the\nconnection's source address, never a header.
+
+alt a semaphore is full
+Daemon --> RemotePeer: 503 (at capacity)
+note right : Refused IMMEDIATELY — no queueing,\nno Retry-After, and NO re-announce.\nUnlike the 404 below, a 503 says\nnothing about what this daemon holds,\nso treating it as drift would let load\ndrive announce traffic. The requester\nhas other holders, and pkg's mirror\nbehind those.
+else a slot is free
+
 Daemon -> Cache: open(packageName-version)
 activate Cache
 
@@ -32,7 +40,9 @@ Daemon --> RemotePeer: 404 (package not held)
 Daemon -> Tracker: announce(fullPackageList)
 note right : Full re-announce (UC-05):\nif one entry drifted, others\nmay have too (e.g. pkg clean).\nDaemon never serves data\nit does not hold.
 end
- 
+
+end
+
 deactivate Daemon
 @enduml
 

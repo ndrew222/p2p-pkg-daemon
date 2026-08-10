@@ -18,11 +18,16 @@ read the README and `docs/` instead; this file assumes you are an agent.
 4. `docs/peer-transfer-spec-v0.2.md` — the daemon↔daemon wire for package bytes (UC-02 fetch loop, UC-06 serving side): HTTP over TCP, `GET /pkg/<name-version>`, status codes, the size and hash bound, buffering and timeouts.
 5. `docs/use-case-descriptions.md` — UC-01 … UC-07 behaviour spec. UC-07 was broken as written; **ADR-005 fixed it — the facade proxies metadata.** The use case is rewritten accordingly.
 6. `docs/uc-*.puml` — authoritative where the prose is ambiguous.
-7. `README.md` — orientation only.
+7. `README.md` — orientation only, and `TESTING.md` alongside it for how the
+   system is tested. Neither is binding; where either disagrees with a document
+   above, that document wins and the root file is the bug.
 
 The pkg↔daemon wire has **no spec file**. It is governed entirely by ADRs:
-ADR-003 for fetch semantics and status codes, ADR-004 for the path rule,
-ADR-005 for the metadata branch (the facade proxies it).
+ADR-003 for fetch semantics and status codes, ADR-004 for the path rule and
+`GET`-only, ADR-005 for the metadata branch (the facade proxies it), ADR-006 for
+`upstream_url` (required, no default), ADR-007 for jmj fronting exactly one
+repository, ADR-009 for the status set being exhaustive with no `500`, and
+ADR-010 for preferring our own repository's row on a name-version collision.
 
 These are **three separate wires** and they do not share a path grammar. The peer wire's `/pkg/<name-version>` namespace is deliberately unlike the facade's `…/All/<name-version>.pkg` so that a seeding daemon cannot be mistaken for, or used as, a pkg mirror. Do not "unify" them.
 
@@ -45,16 +50,29 @@ the path rule — is discharged: ADR-004 is Approved and now carries that rule.
 ```
 cmd/trac/           tracker entry point (thin main only)
 cmd/jmj/            daemon entry point (thin main only)
+cmd/demo/           not shipped: drives the real peer wire end to end in one process
+internal/config/    load / validate / generate-to-stdout; no writer, by design
 internal/tracker/   tracker logic
 internal/proto/     message types, encoding, validation (shared by both sides)
-internal/discovery/ daemon-side tracker client (announce/ping/IWant)
-internal/daemon/    daemon logic — facade, fetch loop, cache watcher (created as work lands)
+internal/discovery/ daemon-side tracker client (announce/ping/IWant) + keep-alive
+internal/daemon/    daemon logic — facade, repository DB reader, cache and repo watchers
+internal/peer/      the daemon↔daemon wire: requester, seeder, caps, blacklist
 docs/               specs — agents do not modify these
-docs/logs/          agent work logs — see below`
+docs/adr/           architectural design records — precedence rank 1
+docs/logs/          agent work logs, HANDOFF.md and the demo guide — see below
+README.md           orientation for a human
+TESTING.md          what is tested, at which layer, and what is not
 ```
 
 Anything not listed above is not fixed. Do not create new top-level directories
 without asking.
+
+**`docs/` is still off limits, and the git history does not say otherwise.** One
+commit on 2026-08-10 edits specs and use cases: it applied `HANDOFF.md` §9's
+backlog — replacement text written by an earlier audit, approved by rulings
+already made — under a one-off permission the owner granted for that commit
+alone. It is not a precedent. Record what needs changing in `HANDOFF.md` §9 and
+ask.
 
 Module path: `github.com/ndrew222/p2p-pkg-daemon`, Go 1.26.
 
@@ -78,6 +96,12 @@ go test ./...
 No linter is configured; `gofmt` your code (this is not optional in Go anyway).
 No CI exists yet — the commands above are the gate. Tracker code and tests must run on any OS: no FreeBSD dependency, no `pkg`, no second machine.
 The "Definition of done" section in the tracker spec is the tracker's test list; write those as table-driven tests.
+
+`go test ./... -race -count=2` is **not** part of the gate above and is required
+before a merge request. A change once merged green with a data race the plain
+gate cannot see, found only when a later change ran `-race`, and intermittent
+even then. `TESTING.md` has the full picture: the layers, what each proves, the
+adversarial cases, and what is deliberately not covered.
 
 Commit and branch naming: no convention, use your judgment.
 
@@ -111,4 +135,3 @@ Commit and branch naming: no convention, use your judgment.
   line as a reason to leave a genuine defect unfixed.
 - A slow peer is out of scope, exactly as a slow mirror is. Do not add stall
   detectors, minimum-throughput rules or transfer deadlines to "fix" it.
-```

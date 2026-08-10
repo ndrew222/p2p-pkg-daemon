@@ -83,7 +83,10 @@ Consequences of the split, all intended:
 
 - A `.pkg` suffix is **not** used here. The identifier is the bare name-version.
 - There is no repo-path prefix to ignore. The path is exact; anything else is a
-  `404`.
+  `400`, per the *Responses* table. It is deliberately **not** a `404`: a `404`
+  carries the UC-06 §5b re-announce obligation, and a malformed path is no
+  evidence about what this daemon holds — answering one would let a hostile
+  peer drive our announce traffic. (Ruled 2026-08-10; `HANDOFF.md` §5.3.)
 - `packagesite.pkg`, `meta.conf` and friends have no representation on this
   wire at all.
 
@@ -300,7 +303,7 @@ error, including permanent ones, and hot-spins on a closed listener. Moving to
 |---|---|
 | Concurrency limits on the serving side | ~~Open. No cap on simultaneous seeds is specified.~~ **Decided by `docs/adr/adr-002-serving-side-concurrency.md`:** a global cap *and* a per-remote-IP cap, both non-blocking, both defaulting to `0` = unlimited, `503` when either is full. Specified under *Serving side obligations* above. It is admission control, not the forbidden bandwidth management — it sets no rate, no throughput floor and no deadline, and an accepted transfer runs exactly as fast as it otherwise would. |
 | Resumption / `Range` on the requesting side | Out of scope for v0.2. The server may support it; the client does not use it. |
-| Whether `PackageHashes` and `RepositoryDatabase` merge | Open. They are two views of the same repository row and this spec relies on both being present together, which strengthens the case for merging. Not decided here. |
+| Whether `PackageHashes` and `RepositoryDatabase` merge | ~~Open. They are two views of the same repository row and this spec relies on both being present together, which strengthens the case for merging. Not decided here.~~ **Decided — they stay separate**, composed as `daemon.Repository` where both are needed. Owner ruling, `HANDOFF.md` §4.3; rationale in `internal/daemon/repository.go`. `SanityFilter` takes the size-only interface so that the announce path *cannot* hash, which the merged type would not preserve. Do not merge them. |
 | TLS, authentication, peer identity | None in v0.2. Consequences are availability-only and self-correcting, as with the tracker. |
 | `HEAD` on the mirror facade | ~~Unchanged and still open.~~ **Answered by measurement** (`docs/logs/claude-pkg-mirror-verification.md` §7.3): pkg 2.7.5 issues only plain `GET` against a mirror — zero `HEAD`, zero `Range`, across a catalogue refresh, a `pkg fetch` and a real `pkg install`. See `mirror-facade-spec-v0.1.md` open question 1 for the scope limit on that result. |
 
