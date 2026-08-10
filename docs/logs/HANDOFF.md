@@ -100,14 +100,17 @@ is confirmed by measurement, `pkg update` and a real `pkg install` work end to
 end through the facade, and the `mirror_type: http` bug report is complete and
 fileable. See §7.6–§7.9 and `docs/logs/claude-freebsd-host-round.md`.
 
-**Two machines are no longer entirely unproven** (2026-08-10, §7.10): a daemon
-on a Linux box fetched 4,842,922 verified bytes from a FreeBSD peer at a real
-public address, and a NAT'd peer was measured announcing, failing to be dialed,
-and correctly *not* being blacklisted — ADR-001's asymmetry, first evidence.
-What is still missing is a swarm of two *reachable* peers: selection among
-several holders, blacklisting across a real link, and a long transfer. See
-`docs/logs/claude-demo-guide.md` §3, which carries the recipe and the exact
-commands.
+**The two-machine trial is done (2026-08-10, §7.10 and §7.11).** Three machines,
+two of them public FreeBSD boxes: transfers in both directions, selection among
+several holders, a **hostile peer serving a same-size forgery** — caught on hash,
+blacklisted, and the caller still served correctly — recovery from a corrupt peer
+*within* the swarm, ADR-001's asymmetry for a NAT'd peer, ADR-002's `503` under a
+cap, a tracker on a machine that is neither peer, and **98 MB moved at 43.5 MB/s
+with the requester's RSS up 20 KiB and the seeder's unchanged**. Work log:
+`docs/logs/claude-two-machine-trial.md`. **Nothing failed and nothing surprised.**
+
+What remains untested is narrower and listed at `claude-demo-guide.md` §3.4.1: a
+genuinely slow link, an interrupted transfer, more than three holders.
 
 Read before touching the facade: ADR-003 (fetch semantics), ADR-004 (path
 rule), ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj
@@ -989,8 +992,11 @@ UC-02 work. Summary only:
    probe; the cache stays flat. Closes §5.6.
 
 ~~Remaining unknowns, both minor: whether `cksum` is ever not sha256-hex~~
-**Closed by §7.6 below.** One unknown remains: where the tracker runs for a real
-two-machine trial.
+**Closed by §7.6 below.** ~~One unknown remains: where the tracker runs for a
+real two-machine trial.~~ **Answered 2026-08-10 — §7.11.** The tracker needs a
+publicly reachable address, not a particular OS; it ran on one of the peers and
+then, in the last phase, on a box that was neither peer. A tracker behind NAT
+needs a forwarded port, which is measured, not assumed.
 
 ### §7.6–§7.9 — the host round, 2026-08-09 — **ANSWERED**
 
@@ -1062,11 +1068,17 @@ child core's backtrace puts the fault in `fetchFreeURL` ← `libfetch_open`, and
 both isolation runs still crash. Filing it needs a Bugzilla account, which is
 why it is the owner's step and not this session's.
 
-### §7.10 — two machines, 2026-08-10 — **PARTLY ANSWERED**
+### §7.10 — two machines, 2026-08-10 — **ANSWERED**
 
-Full transcript and the commands: **`docs/logs/claude-demo-guide.md` §3.** The
-first measurements in this project's history where the two ends of a transfer
-are different machines.
+**The two-machine trial is done.** It ran in two rounds the same day: first one
+FreeBSD box and a NAT'd Linux box (items 10–13 below), then a second public
+FreeBSD box supplied by the owner, which closed everything the first round left
+open (§7.11). Work log: **`docs/logs/claude-two-machine-trial.md`**. Commands
+and transcripts: **`docs/logs/claude-demo-guide.md` §3.**
+
+**There is now no unproven claim in the design that a third machine would
+settle.** What is left untested is narrower and stated at the guide's §3.4.1: a
+genuinely slow link, an interrupted transfer, and more than three holders.
 
 10. **A peer that is not `127.0.0.1` works.** A daemon on a Linux box, with an
     empty cache and a copy of the catalogue, fetched `fish-4.6.0_2` through its
@@ -1081,11 +1093,8 @@ are different machines.
     upstream and served correct bytes. **It was not blacklisted** — a dial
     failure never does that. "Every daemon can fetch, only reachable ones seed"
     had never been exercised before this.
-12. **Still not proven, and it needs two *reachable* peers**: selection among
-    several holders, blacklisting on a hash mismatch over a real link, a swarm
-    where a host both serves and is served, a transfer long enough for latency
-    to matter, and a tracker on a third machine. The recipe is in the guide's
-    §3.4 — one more Vultr instance covers all of it.
+12. ~~Still not proven, and it needs two *reachable* peers~~ — **all of it was
+    covered the same day by §7.11**, on a second public box.
 13. **The shareable-set decay of §7.9 reproduced unprompted**: the same host
     announced **4 of the 20 packages in its cache**, a day after the round that
     first measured 4 of 20. **Ruled 2026-08-10: this is a known bound, not an
@@ -1095,6 +1104,37 @@ are different machines.
     demo guide §3.5. `SanityFilter` is what keeps the stale copies out of the
     announce; a change that "optimises" it away would have peers fetching bytes
     that cannot verify.
+
+### §7.11 — the full trial on two public boxes, 2026-08-10 — **ANSWERED**
+
+Three machines: a tracker-and-daemon box, a second daemon box, and a NAT'd
+fetcher. Full detail in `docs/logs/claude-two-machine-trial.md`; the numbers that
+matter to someone changing this code:
+
+14. **Constant memory is real, on a real transfer.** 98,852,086 bytes moved
+    between two boxes in **2.27s (~43.5 MB/s)** while the requester's RSS went
+    27,992 → **28,012 KiB (+20 KiB)** and the seeder's did not move at all.
+    `temp_dir` empty afterwards. Until now the evidence for `AGENTS.md`'s
+    constant-memory constraint was a code review and a 43-byte demo. **A `[]byte`
+    in either signature would now regress a measured property.**
+15. **A hostile peer is caught by the only thing that can catch it.** A forgery
+    with the **right size and wrong bytes** is announced normally —
+    `SanityFilter` compares sizes — so the requester's hash check is the entire
+    defence, and it worked: the peer was blacklisted, the bytes were deleted, and
+    **the caller still received the correct package** from upstream. With a
+    second holder present the fetch instead **retried and succeeded from the
+    swarm**, never touching upstream.
+16. **The blacklist is whole-peer and it bites.** The request immediately after a
+    mismatch, for a package that peer held *honestly*, was skipped without a
+    dial. One bad package costs a peer all of its usefulness to that daemon until
+    restart — documented, deliberate, and now observable.
+17. **ADR-002's `503` degrades to upstream, not to failure.** With
+    `max_concurrent_seeds: 1`, a second concurrent request was refused instantly
+    with no queueing, the requester advanced, and **both callers got 200**.
+18. **Peer order from the tracker is a map iteration and is effectively random.**
+    Not a defect — nothing specifies an order — but a test that assumes one can
+    pass without exercising what it claims to, which is how this round's first
+    hostile-peer setup was built and had to be redone.
 
 ## 8. Traps
 
@@ -1142,6 +1182,19 @@ Added 2026-08-08, from the §7 work:
   working package manager until the file is removed.
 - **Verify teardown and "it's clean now" claims against the host yourself.** It
   is three read-only commands, and a report is not evidence.
+
+Added 2026-08-10, from the two-machine trial:
+
+- **Do not assume the tracker's peer order.** `/peers` iterates a Go map, so the
+  order is effectively random per query. A multi-holder test that relies on a
+  particular peer being tried first can pass while never exercising the path it
+  claims to — which is exactly how this round's first hostile-peer setup was
+  built. Curate the holder set so only one path is possible.
+- **A forged package has the right size.** `SanityFilter` compares sizes, so a
+  same-size, wrong-bytes copy is announced normally and the requester's hash
+  check is the *only* thing standing between it and the caller. Any change that
+  weakens or defers that check removes the entire defence — and it was measured
+  working, over a real link, in §7.11.
 
 Added 2026-08-09, from the host round:
 
