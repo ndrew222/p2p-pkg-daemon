@@ -9,8 +9,9 @@ address — see HANDOFF §7), `<host-ip>` is its public address and `<peer-ip>` 
 the other machine's. Nothing else is retouched, including the parts that show a
 mistake.
 
-Anything not yet run by anyone says so in its own heading. There is exactly one
-such section (§3.4), and it is the two-box trial.
+Anything not yet run by anyone says so in its own heading. **Every section here
+has now been run**, including the two-box trial (§3.4); what remains untested is
+listed explicitly at §3.4.1 rather than left to inference.
 
 | Demo | Needs | Time | Proves |
 |---|---|---|---|
@@ -18,7 +19,7 @@ such section (§3.4), and it is the two-box trial.
 | §1.2 the tracker | nothing | 1min | registration, the 3-peer cap, expiry-by-deregistration, the load-bearing `404` |
 | §1.3 gate + fuzzer | nothing | 1min | the suite, the race detector, the seeder's HTTP surface |
 | §2 one FreeBSD host | the host | 10min | **the whole system against real pkg**, up to and including `pkg install` |
-| §3 two machines | + a second box | 15min | a peer that is not `127.0.0.1` |
+| §3 two machines | + a second box | 15min | a peer that is not `127.0.0.1`: real addresses, a hostile peer, 98 MB at constant memory |
 
 ## §1 — No FreeBSD, no pkg, no second machine
 
@@ -546,22 +547,67 @@ upstream, the caller got correct bytes, and **the peer was not blacklisted** —
 only a hash mismatch blacklists, never a dial failure. Cost of a NAT'd peer in
 the swarm: five seconds, once, to whoever tries it.
 
-### 3.4 What two machines still have not proven — NOT RUN
+### 3.4 The full trial, on two public boxes — run 2026-08-10
 
-| Not covered | Why it needs two *reachable* peers |
+A second box closed everything this section used to list as untested. Full log,
+including the setup that would have proved nothing and had to be redone:
+**`docs/logs/claude-two-machine-trial.md`**.
+
+| Was untested | Result |
 |---|---|
-| Selection among several holders | Every run so far had exactly one dialable holder. |
-| A peer that is dialable but hostile | Blacklisting on a hash mismatch has only ever been tested in-process. |
-| Both directions | The NAT'd box can fetch and cannot seed; nothing has served *and* been served in the same swarm. |
-| Latency and size together | 4.8 MB at 7.9 MB/s is under a second. Nothing has exercised a long transfer, and the design deliberately has no stall detector — that choice is untested against a slow real link. |
-| A tracker separate from both peers | The tracker shared a host with one peer. |
+| Selection among several holders | Two holders offered, first taken, second never contacted. Peer order is a **map iteration — effectively random per query**; do not build a test that assumes it. |
+| A dialable but hostile peer | Same-size forgery served; requester rejected it on hash, **blacklisted the peer**, and the caller still got the correct package from upstream. |
+| Whole-peer blacklisting | The next request — a package that peer held *honestly* — was skipped without a dial. |
+| Recovery inside the swarm | With a second holder present: corrupt peer blacklisted, **retried, served from the swarm**, upstream never contacted. |
+| Both directions | Each box served and was served, 21 seconds apart. |
+| Size and latency | **98,852,086 bytes in 2.27s (~43.5 MB/s)**, and RSS moved **+20 KiB on the requester, 0 on the seeder**. The constant-memory constraint, measured on a real transfer for the first time. |
+| A tracker separate from both peers | Tracker-only box, its own registration expired after the 60s `Timeout`, transfer between the other two. |
+| ADR-002's `503` (bonus) | Cap of 1: the big transfer held the slot, the second request was refused instantly with no queueing, the requester advanced to upstream. **Both callers got 200.** |
 
-**The recipe** for the real thing, which needs one more box: two FreeBSD
-instances with public addresses, `trac` on either one (or a third), each daemon's
-`tracker_url` pointing at the tracker's public address, `serving_addr` on
-`0.0.0.0` with its port open, `facade_addr` left on loopback. Prime one host's
-cache by installing a package there, then install the same package on the other
-and watch it come off the first. Everything else in §2 applies unchanged.
+**The recipe, as run.** Two public FreeBSD instances plus any third machine as
+the fetcher:
+
+```sh
+# on each box: same jmj config, tracker pointed at the TRACKER'S PUBLIC ADDRESS
+./jmj -generate-config -upstream 'https://pkg.FreeBSD.org/${ABI}/quarterly' \
+  -tracker http://<tracker-ip>:8080 \
+  -facade-addr 127.0.0.1:9101 -serving-addr 0.0.0.0:9102 \
+  -temp-dir /root/jmjt/tmp -cache /var/cache/pkg -repo-db /var/db/pkg/repos > config.json
+
+# prime a shared set FRESH on both boxes -- cached copies decay against the
+# catalogue (§3.5), and two stock hosts start with no announceable overlap
+pkg fetch -y curl git
+
+# who holds what, from anywhere
+curl 'http://<tracker-ip>:8080/peers?pkg=curl-8.21.0'
+
+# fetch through a box's own facade; the peer wire does the rest
+fetch -qo /tmp/x.pkg http://127.0.0.1:9101/All/gcc14-14.2.0_6.pkg
+```
+
+Point `tracker_url` at the tracker's **public** address even on the box running
+the tracker: announcing to `127.0.0.1` registers the peer as `127.0.0.1`, and
+every other peer then dials itself.
+
+To reproduce the hostile-peer result, copy a package into a daemon's cache
+directory and overwrite one byte **without changing the length** — `SanityFilter`
+compares sizes, so a same-size forgery is announced normally and only the
+requester's hash check catches it. Curate holder sets so exactly one path is
+possible; with two honest holders and random ordering, a test can pass without
+ever exercising what it claims to.
+
+### 3.4.1 What is still not covered
+
+Small and worth stating rather than implying completeness:
+
+- **A slow link.** Both boxes are well-connected; 98 MB moved in 2.27s. The
+  deliberate absence of stall detectors and transfer deadlines is still untested
+  against a genuinely slow or lossy peer — which is the condition it exists to
+  tolerate.
+- **An interrupted transfer.** Nothing has been killed mid-stream, so
+  resume-after-interrupt — the one place a `Range` request would plausibly appear
+  — remains unobserved (§7.3's caveat).
+- **More than three holders.** `MaxPeers` is 3 and was never saturated.
 
 ### 3.5 A bound worth knowing before you build a swarm
 
