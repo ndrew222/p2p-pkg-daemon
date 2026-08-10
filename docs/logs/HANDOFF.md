@@ -66,9 +66,14 @@ into it. *(This line used to pin a commit hash, which went stale at every merge
 and twice told a new agent the tree was further behind than it was. Run
 `git log --oneline -5` instead — it is authoritative and this line cannot be.)*
 
-ADR-001 through -009 are all Approved. **§5.2 (the reload trigger), §5.3 (the
+ADR-001 through -010 are all Approved. **§5.2 (the reload trigger), §5.3 (the
 peer wire migration and the cache-backed seeder), §5.4 (mounting both servers)
 and §5.7 (the facade rework) are all done.** There is no large open work item.
+
+**Want to see it work before you change it?**
+`docs/logs/claude-demo-guide.md` is every demo in the project, ordered by what
+it costs to run: five seconds and no dependencies at one end, two machines at
+the other. Every transcript in it was produced on the date it names.
 
 **Every item in §4 is closed.** §4.4, §4.5 and §4.6 by ADR-005, ADR-006 and
 ADR-007 (2026-08-08); §4.7, the two ADR-002 config key names, by owner ruling
@@ -76,23 +81,33 @@ ADR-007 (2026-08-08); §4.7, the two ADR-002 config key names, by owner ruling
 upheld and made binding by ADR-009, (c) overturned so that pkg's `User-Agent` is
 relayed, (b) and (d) ratified exactly as they shipped.
 
-**One thing is with the owner and nothing is blocked on it.** §5.3: the peer
-spec contradicts itself on whether a non-exact path is `400` or `404`. One line
-either way; see `docs/logs/claude-peer-wire-v0.2.md`.
+**Nothing is with the owner as a question.** §5.3's one open item — whether a
+non-exact path on the peer wire is `400` or `404` — was **ruled `400`
+(2026-08-10)**, which is what shipped. This document is the citable source, as
+it is for §4.7; the spec's prose still says `404` in one place and only the owner
+can edit `docs/`, so it is listed under §9 with replacement text.
 
 Both items the host round raised were ruled on 2026-08-10 and are fixed —
 **§4.9** (the watcher ignores pkg's lock file; ADR-008 carries a dated
 amendment) and **§4.10** (the daemon prefers its own repository's rows;
-ADR-010).
+ADR-010). Both fixes were **re-verified on the host on 2026-08-10** by a later
+session: `docs/logs/claude-host-round-fixes.md` is their work log and
+`docs/logs/claude-demo-guide.md` §2.5 is the measurement.
 
 **The FreeBSD host round is done (2026-08-09) and closed nearly everything it
 was holding**: the suite passes on the target OS, ADR-008's platform assumption
 is confirmed by measurement, `pkg update` and a real `pkg install` work end to
 end through the facade, and the `mirror_type: http` bug report is complete and
-fileable. See §7.6–§7.9 and `docs/logs/claude-freebsd-host-round.md`. **The one
-thing still genuinely unproven is a two-machine trial** — everything measured so
-far is one host talking to itself over loopback, which exercises every code path
-and proves nothing about NAT, latency, or a peer that is not `127.0.0.1`.
+fileable. See §7.6–§7.9 and `docs/logs/claude-freebsd-host-round.md`.
+
+**Two machines are no longer entirely unproven** (2026-08-10, §7.10): a daemon
+on a Linux box fetched 4,842,922 verified bytes from a FreeBSD peer at a real
+public address, and a NAT'd peer was measured announcing, failing to be dialed,
+and correctly *not* being blacklisted — ADR-001's asymmetry, first evidence.
+What is still missing is a swarm of two *reachable* peers: selection among
+several holders, blacklisting across a real link, and a long transfer. See
+`docs/logs/claude-demo-guide.md` §3, which carries the recipe and the exact
+commands.
 
 Read before touching the facade: ADR-003 (fetch semantics), ADR-004 (path
 rule), ADR-005 (metadata is proxied), ADR-006 (`upstream_url`) and ADR-007 (jmj
@@ -780,11 +795,19 @@ handle and a size, `cmd/demo` runs the real wire, and the cache-backed seeder
 exists at `internal/daemon/cachesource.go`. Mounting it on `serving_addr` is
 §5.4, which is where that half is recorded.
 
-**One item is with the owner** — the spec's *Request surface* section says a
-non-exact path is a `404` while its *Responses* table says `400`. Implemented
-per the table, because `404` carries the UC-06 §5b re-announce obligation and a
-malformed path is no evidence about what this daemon holds. Flagged in the work
-log; flipping it is a one-line change.
+~~**One item is with the owner**~~ — **RULED 2026-08-10: `400` is canonical**,
+which is what shipped. The spec's *Request surface* section says a non-exact
+path is a `404` while its *Responses* table says `400`; the table wins. The
+reason the implementation chose it stands as the reason the ruling did: `404`
+carries the UC-06 §5b re-announce obligation, so answering it to a malformed
+path would let a hostile peer drive our announce traffic, and a malformed path
+is no evidence about what this daemon holds either way.
+
+**This section is the citable source**, as §4.7 is for ADR-002's key names — the
+spec is self-contradictory and `docs/` is not ours to edit. The prose half is
+listed at §9 with replacement text. No code change: `internal/peer/serve.go` is
+already correct, and the demo guide §2.6 shows the `400` and the `404` side by
+side against real pkg.
 
 The original statement of the work follows.
 
@@ -1000,7 +1023,16 @@ Full evidence: **`docs/logs/claude-freebsd-host-round.md`**. Summary only.
    wasting a peer's transfer. Nothing in the design documents anticipates this
    decay, and it bounds how much a swarm can actually share.
 
-**The `mirror_type: http` bug report is complete and fileable** —
+**The `mirror_type: http` bug report is complete and fileable, and the owner
+files it out of band (ruled 2026-08-10).** It is not a work item for this
+repository and should not be carried as one. What it *is* worth recording is
+what it means: `mirror_type: http` is the one mirror-ordering mechanism that
+fits daemon-first selection (§7.2), and it crashes pkg 2.7.5 — so **the gap is
+in FreeBSD's own infrastructure, not in this design**, and it is why ADR-007's
+"jmj fronts one repository" is the only shape available rather than one choice
+among three. Do not design around the crash and do not re-litigate the
+mechanism; the report below is the record.
+
 `docs/logs/freebsd-bug-report-pkg-mirror-type-http.md`. The child core's
 backtrace puts the fault in **`fetchFreeURL` ← `libfetch_open`**, with frame 0
 inside libc's allocator, on the first fetch after the mirror list is parsed.
@@ -1029,6 +1061,40 @@ and fileable at `docs/logs/freebsd-bug-report-pkg-mirror-type-http.md`: the
 child core's backtrace puts the fault in `fetchFreeURL` ← `libfetch_open`, and
 both isolation runs still crash. Filing it needs a Bugzilla account, which is
 why it is the owner's step and not this session's.
+
+### §7.10 — two machines, 2026-08-10 — **PARTLY ANSWERED**
+
+Full transcript and the commands: **`docs/logs/claude-demo-guide.md` §3.** The
+first measurements in this project's history where the two ends of a transfer
+are different machines.
+
+10. **A peer that is not `127.0.0.1` works.** A daemon on a Linux box, with an
+    empty cache and a copy of the catalogue, fetched `fish-4.6.0_2` through its
+    own facade from a FreeBSD peer at a real public address: **4,842,922 bytes,
+    verified, 7.9 MB/s**, SHA-256 beginning `6f428aecbd` — matching the `~hash10`
+    suffix on the seeder's cached file. The tracker registered both peers under
+    their real public IPs with no configuration, because it keys on the
+    connection's source address.
+11. **ADR-001's asymmetry is real, and it costs five seconds.** The Linux box is
+    behind NAT: it announced normally, and when it was the only holder the
+    FreeBSD daemon dialled it, hit the 5-second `dialTimeout`, fell through to
+    upstream and served correct bytes. **It was not blacklisted** — a dial
+    failure never does that. "Every daemon can fetch, only reachable ones seed"
+    had never been exercised before this.
+12. **Still not proven, and it needs two *reachable* peers**: selection among
+    several holders, blacklisting on a hash mismatch over a real link, a swarm
+    where a host both serves and is served, a transfer long enough for latency
+    to matter, and a tracker on a third machine. The recipe is in the guide's
+    §3.4 — one more Vultr instance covers all of it.
+13. **The shareable-set decay of §7.9 reproduced unprompted**: the same host
+    announced **4 of the 20 packages in its cache**, a day after the round that
+    first measured 4 of 20. **Ruled 2026-08-10: this is a known bound, not an
+    open question.** A host's shareable set decays as the repository is rebuilt,
+    so a swarm is worth most in the burst case — many hosts installing the same
+    thing in the same window — and least as a long-lived archive. Stated in the
+    demo guide §3.5. `SanityFilter` is what keeps the stale copies out of the
+    announce; a change that "optimises" it away would have peers fetching bytes
+    that cannot verify.
 
 ## 8. Traps
 
@@ -1093,6 +1159,60 @@ Added 2026-08-09, from the host round:
   file, so a watch on it fires once and then goes permanently deaf while ~21,600
   subsequent writes go unseen. Watch directories. This is ADR-008 and it now has
   evidence, not just an argument.
+
+## 9. Spec edits waiting on the owner
+
+Two places where `docs/` still contradicts a ruling. **Agents do not modify
+specs** (`AGENTS.md`), so both are recorded here with the exact replacement text
+rather than applied. Neither blocks anything and neither needs code: the code is
+already on the ruled side of both.
+
+Until they land, **this document is the citable source for both** — cite §5.3
+and §4.3, not the spec text they contradict.
+
+### 9.1 `docs/peer-transfer-spec-v0.2.md`, *Request surface* — `404` should be `400`
+
+The third bullet under *Consequences of the split* says a non-exact path is a
+`404`; the *Responses* table says `400`, and `400` was ruled canonical on
+2026-08-10 (§5.3).
+
+Replace:
+
+> - There is no repo-path prefix to ignore. The path is exact; anything else is a
+>   `404`.
+
+with:
+
+> - There is no repo-path prefix to ignore. The path is exact; anything else is a
+>   `400`, per the *Responses* table. It is deliberately **not** a `404`: a `404`
+>   carries the UC-06 §5b re-announce obligation, and a malformed path is no
+>   evidence about what this daemon holds — answering one would let a hostile
+>   peer drive our announce traffic. (Ruled 2026-08-10; `HANDOFF.md` §5.3.)
+
+### 9.2 `docs/peer-transfer-spec-v0.2.md`, *Deliberately unspecified* — a row that is no longer open
+
+The table still invites an agent to merge `PackageHashes` and
+`RepositoryDatabase`, and even argues for it. That was decided the other way
+(§4.3, owner) and the split is load-bearing: `SanityFilter` takes a **size-only**
+interface, and that signature is what proves the announce path cannot hash
+(`AGENTS.md`: *no hashing at announce time*). Merging them hands the watcher a
+hash it is merely trusted to ignore. This matters more than a stale row usually
+would, because `AGENTS.md` ground rule 3 points agents *at this table
+specifically*.
+
+Replace the row:
+
+> | Whether `PackageHashes` and `RepositoryDatabase` merge | Open. They are two
+> views of the same repository row and this spec relies on both being present
+> together, which strengthens the case for merging. Not decided here. |
+
+with:
+
+> | Whether `PackageHashes` and `RepositoryDatabase` merge | **Decided — they
+> stay separate**, composed as `daemon.Repository` where both are needed. Owner
+> ruling, `HANDOFF.md` §4.3; rationale in `internal/daemon/repository.go`.
+> `SanityFilter` takes the size-only interface so that the announce path
+> *cannot* hash, which the merged type would not preserve. Do not merge them. |
 
 ## Suggested skills
 
